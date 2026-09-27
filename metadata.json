@@ -1,0 +1,6 @@
+{
+  "name": "MIKE AI PHOTO",
+  "description": "Application de photographie avec caméra native, amélioration IA naturelle et comparateur interactif avant/après.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

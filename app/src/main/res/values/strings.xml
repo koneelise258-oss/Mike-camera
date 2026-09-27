@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">MIKE AI PHOTO</string>
+    <string name="take_photo">Prendre une photo</string>
+    <string name="import_photo">Importer une photo</string>
+    <string name="gallery_title">Galerie MIKE AI</string>
+    <string name="processing_photo">Traitement de votre photo…</string>
+    <string name="processing_subtitle">Amélioration dynamique, micro-contraste &amp; balance naturelle</string>
+    <string name="save_to_gallery">Enregistrer</string>
+    <string name="share_photo">Partager</string>
+    <string name="retake_photo">Recommencer</string>
+    <string name="original_label">ORIGINAL</string>
+    <string name="mike_ai_label">MIKE AI</string>
+    <string name="photo_saved_success">Photo enregistrée dans votre galerie !</string>
+    <string name="error_capturing_photo">Impossible de récupérer la photo prise par la caméra.</string>
+    <string name="error_importing_photo">Impossible d\'importer la photo sélectionnée.</string>
+    <string name="error_processing">Une erreur est survenue lors de l\'amélioration de l\'image.</string>
+</resources>
