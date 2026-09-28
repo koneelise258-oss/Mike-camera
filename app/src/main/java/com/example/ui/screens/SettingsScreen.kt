@@ -40,7 +40,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.ui.platform.LocalContext
 import com.example.camera.CameraSourcePreference
 import com.example.engine.EnhancementPreset
 import com.example.ui.components.LiquidEnvironment
@@ -55,6 +59,7 @@ import com.example.ui.theme.GlassSurfaceMedium
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.util.DeviceOptimizer
 import kotlin.math.roundToInt
 
 @Composable
@@ -417,6 +422,148 @@ fun SettingsScreen(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                 }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 4. Hardware Optimization & Tecno Camon 15 Air Section
+        val context = LocalContext.current
+        val hardwareInfo = remember(context) { DeviceOptimizer.getHardwareInfo(context) }
+
+        Text(
+            text = "OPTIMISATION MATÉRIELLE",
+            color = AmberStudio,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.2.sp
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+
+        LiquidGlassCard(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            backgroundColor = GlassSurfaceLight
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Memory,
+                            contentDescription = null,
+                            tint = AmberStudio,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Profil Détecté",
+                            color = TextPrimary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(Color(0x334ADE80))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = Color(0xFF4ADE80),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Actif",
+                                color = Color(0xFF4ADE80),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Device Specs Summary
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0x1AFFFFFF))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Appareil cible", color = TextMuted, fontSize = 12.sp)
+                        Text(
+                            text = if (hardwareInfo.isOptimizedForCamon15) "Tecno Camon 15 Air (CD6)" else hardwareInfo.deviceName,
+                            color = AmberStudio,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Processeur / SoC", color = TextMuted, fontSize = 12.sp)
+                        Text(hardwareInfo.chipset, color = TextPrimary, fontSize = 12.sp)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("GPU & Affichage", color = TextMuted, fontSize = 12.sp)
+                        Text(hardwareInfo.gpu, color = TextPrimary, fontSize = 12.sp)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Mémoire RAM", color = TextMuted, fontSize = 12.sp)
+                        Text("${hardwareInfo.totalRamText} (${hardwareInfo.availableRamText})", color = TextPrimary, fontSize = 12.sp)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Système", color = TextMuted, fontSize = 12.sp)
+                        Text(hardwareInfo.androidVersion, color = TextPrimary, fontSize = 12.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Highlights of active optimizations
+                Text(
+                    text = "Ajustements automatiques Camon 15 Air :",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "• Mode LargeHeap 512 Mo pour éliminer les erreurs de mémoire (OOM).\n• Tampon photo calibré 1080p/2K (70% d'économie RAM).\n• Moteur graphique PowerVR avec mise en veille du fond animé sous caméra.\n• Pilote CameraX stabilisé contre les blocages du HAL MediaTek.",
+                    color = TextMuted,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp
+                )
             }
         }
     }

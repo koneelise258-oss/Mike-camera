@@ -16,8 +16,8 @@ object MikeAIEngine {
      */
     suspend fun decodeSampledBitmap(
         imageFile: File,
-        maxWidth: Int = 2560,
-        maxHeight: Int = 2560
+        maxWidth: Int = 2048,
+        maxHeight: Int = 2048
     ): Bitmap = withContext(Dispatchers.IO) {
         val options = BitmapFactory.Options().apply {
             inJustDecodeBounds = true
@@ -28,12 +28,8 @@ object MikeAIEngine {
         val origWidth = options.outWidth
         val origHeight = options.outHeight
 
-        if (origHeight > maxHeight || origWidth > maxWidth) {
-            val halfHeight = origHeight / 2
-            val halfWidth = origWidth / 2
-            while ((halfHeight / inSampleSize) >= maxHeight && (halfWidth / inSampleSize) >= maxWidth) {
-                inSampleSize *= 2
-            }
+        while ((origHeight / inSampleSize) > maxHeight || (origWidth / inSampleSize) > maxWidth) {
+            inSampleSize *= 2
         }
 
         val decodeOptions = BitmapFactory.Options().apply {
@@ -42,8 +38,20 @@ object MikeAIEngine {
             inMutable = true
         }
 
-        BitmapFactory.decodeFile(imageFile.absolutePath, decodeOptions)
-            ?: throw IllegalStateException("Impossible de décoder le fichier image: ${imageFile.name}")
+        try {
+            BitmapFactory.decodeFile(imageFile.absolutePath, decodeOptions)
+                ?: throw IllegalStateException("Impossible de décoder le fichier image: ${imageFile.name}")
+        } catch (e: OutOfMemoryError) {
+            System.gc()
+            // Retry with halved resolution if memory is critical
+            val fallbackOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize * 2
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+                inMutable = true
+            }
+            BitmapFactory.decodeFile(imageFile.absolutePath, fallbackOptions)
+                ?: throw IllegalStateException("Mémoire insuffisante pour décoder: ${imageFile.name}")
+        }
     }
 
     /**
@@ -89,7 +97,8 @@ object MikeAIEngine {
         params: EnhancementParams = EnhancementParams(),
         onProgress: ((step: String, progress: Float) -> Unit)? = null
     ): MikeProcessingResult = withContext(Dispatchers.IO) {
-        val fullBitmap = decodeSampledBitmap(imageFile, maxWidth = 4096, maxHeight = 4096)
+        val maxDim = if (com.example.util.DeviceOptimizer.isTecnoCamon15Air) 2048 else 3072
+        val fullBitmap = decodeSampledBitmap(imageFile, maxWidth = maxDim, maxHeight = maxDim)
         val result = processImage(fullBitmap, params, onProgress)
         result.copy(isFullResolution = true)
     }

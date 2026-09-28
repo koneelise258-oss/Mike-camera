@@ -14,7 +14,11 @@ enum class CameraShootingMode(
     PHOTO("photo", "PHOTO", "Capture naturelle haute précision", EnhancementPreset.NATURAL),
     PORTRAIT("portrait", "PORTRAIT", "Mise au point & teint naturel", EnhancementPreset.PORTRAIT),
     NIGHT("night", "NUIT", "Basse lumière & réduction de bruit", EnhancementPreset.NIGHT),
-    PRO("pro", "PRO", "Contrôles manuels & dynamique étendue", EnhancementPreset.VIVID)
+    PRO("pro", "PRO", "Contrôles manuels & dynamique étendue", EnhancementPreset.VIVID),
+    PANORAMA("panorama", "PANO", "Champ visuel ultra-large", EnhancementPreset.NATURAL),
+    SLOW_MOTION("slow_motion", "RALENTI", "Ralenti fluide haute vitesse", EnhancementPreset.CINEMATIC),
+    TIME_LAPSE("time_lapse", "ACCÉLÉRÉ", "Accéléré temporel ultra-dynamique", EnhancementPreset.VIVID),
+    CINEMATIC("cinematic", "CINÉMA", "Rendu cinéma & profondeur", EnhancementPreset.CINEMATIC)
 }
 
 enum class CameraTimer(val seconds: Int, val label: String) {

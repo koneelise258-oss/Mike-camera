@@ -71,6 +71,21 @@ object MediaManager {
         destFile
     }
 
+    suspend fun persistOriginalFile(context: Context, sourceFile: File): File = withContext(Dispatchers.IO) {
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val destFile = File(getPhotosDir(context), "ORIGINAL_${timeStamp}.jpg")
+        if (sourceFile.exists()) {
+            sourceFile.inputStream().use { input ->
+                destFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+        } else {
+            throw IllegalStateException("Le fichier source n'existe pas : ${sourceFile.absolutePath}")
+        }
+        destFile
+    }
+
     suspend fun saveProcessedBitmapToFile(context: Context, bitmap: Bitmap, prefix: String = "PROC"): File = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val file = File(getPhotosDir(context), "${prefix}_${timeStamp}.jpg")
@@ -87,6 +102,13 @@ object MediaManager {
                 ExifInterface.TAG_ORIENTATION,
                 ExifInterface.ORIENTATION_NORMAL
             )
+
+            // Skip if orientation is already standard or undefined
+            if (orientation == ExifInterface.ORIENTATION_NORMAL ||
+                orientation == ExifInterface.ORIENTATION_UNDEFINED
+            ) {
+                return
+            }
 
             val matrix = Matrix()
             when (orientation) {
@@ -106,10 +128,32 @@ object MediaManager {
                 else -> return
             }
 
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            // Inspect bounds first to prevent decoding 48MP raw images into unconstrained RAM
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
+
+            val maxDimension = 2048
+            var inSampleSize = 1
+            val origWidth = boundsOptions.outWidth
+            val origHeight = boundsOptions.outHeight
+            if (origHeight > maxDimension || origWidth > maxDimension) {
+                val halfHeight = origHeight / 2
+                val halfWidth = origWidth / 2
+                while ((halfHeight / inSampleSize) >= maxDimension && (halfWidth / inSampleSize) >= maxDimension) {
+                    inSampleSize *= 2
+                }
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+                inMutable = false
+            }
+
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return
             val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
             FileOutputStream(file).use { out ->
-                rotated.compress(Bitmap.CompressFormat.JPEG, 98, out)
+                rotated.compress(Bitmap.CompressFormat.JPEG, 95, out)
             }
 
             // Update EXIF tag to normal
@@ -118,8 +162,11 @@ object MediaManager {
             newExif.saveAttributes()
 
             if (rotated != bitmap) {
-                bitmap.recycle()
+                rotated.recycle()
             }
+            bitmap.recycle()
+        } catch (_: OutOfMemoryError) {
+            System.gc()
         } catch (_: Exception) {}
     }
 

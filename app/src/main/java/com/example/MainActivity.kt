@@ -221,10 +221,12 @@ fun MainApp(viewModel: PhotoViewModel) {
         Screen.SETTINGS
     )
 
-    LiquidTouchRipple(enabled = uiState.performanceMode != PerformanceMode.DISABLED) {
+    val isCameraActive = uiState.currentScreen == Screen.CAMERA || uiState.currentScreen == Screen.HOME
+
+    LiquidTouchRipple(enabled = !isCameraActive && uiState.performanceMode != PerformanceMode.DISABLED) {
         LiquidBackground(
             environment = uiState.environment,
-            performanceMode = uiState.performanceMode
+            performanceMode = if (isCameraActive) PerformanceMode.DISABLED else uiState.performanceMode
         ) {
             Scaffold(
                 modifier = Modifier.fillMaxSize(),

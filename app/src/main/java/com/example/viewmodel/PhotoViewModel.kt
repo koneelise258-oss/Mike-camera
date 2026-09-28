@@ -97,6 +97,9 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
         MikeAIEngine.activeBackend = geminiBackend
         val db = PhotoDatabase.getInstance(application)
         repository = PhotoRepository(db.photoDao())
+
+        val recommendedMode = com.example.util.DeviceOptimizer.getRecommendedPerformanceMode(application)
+        _uiState.update { it.copy(performanceMode = recommendedMode) }
     }
 
     val allPhotos: StateFlow<List<ProcessedPhoto>> = repository.allPhotos
@@ -145,13 +148,13 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                 // 1. Normalize orientation via EXIF
                 MediaManager.normalizeImageOrientation(capturedFile)
 
-                // 2. Decode high-resolution bitmap
-                val originalBmp = MikeAIEngine.decodeSampledBitmap(capturedFile, maxWidth = 2560, maxHeight = 2560)
+                // 2. Decode high-resolution bitmap with memory bounds safe for Tecno Camon 15 Air
+                val maxDim = com.example.util.DeviceOptimizer.getMaxBitmapDimension(context)
+                val originalBmp = MikeAIEngine.decodeSampledBitmap(capturedFile, maxWidth = maxDim, maxHeight = maxDim)
 
                 // 3. Complete diagnostic analysis & scene detection
                 val analysis = MikeAIEngine.analyzeImage(originalBmp)
 
-                // 4. Open Photo Preview Screen immediately
                 _uiState.update {
                     it.copy(
                         currentScreen = Screen.PREVIEW,
@@ -159,9 +162,17 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                         originalFile = capturedFile,
                         detectedScene = analysis.sceneType,
                         currentAnalysis = analysis,
+                        currentParams = EnhancementParams(
+                            preset = it.defaultPreset,
+                            aiIntensity = it.defaultAiIntensity
+                        ),
                         isProcessing = false,
                         errorMessage = null
                     )
+                }
+
+                if (_uiState.value.autoProcessAfterCapture) {
+                    startEnhanceCapturedPhoto(context)
                 }
             } catch (e: Exception) {
                 _uiState.update {
@@ -185,11 +196,12 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                // 1. Normalize orientation via EXIF
+                // 1. Normalize orientation via EXIF safely without unconstrained allocation
                 MediaManager.normalizeImageOrientation(capturedFile)
 
-                // 2. Decode high-resolution bitmap
-                val originalBmp = MikeAIEngine.decodeSampledBitmap(capturedFile, maxWidth = 2560, maxHeight = 2560)
+                // 2. Decode high-resolution bitmap with memory bounds safe for Tecno Camon 15 Air
+                val maxDim = com.example.util.DeviceOptimizer.getMaxBitmapDimension(context)
+                val originalBmp = MikeAIEngine.decodeSampledBitmap(capturedFile, maxWidth = maxDim, maxHeight = maxDim)
 
                 // 3. Complete diagnostic analysis & scene detection
                 val analysis = MikeAIEngine.analyzeImage(originalBmp)
@@ -240,7 +252,8 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 val localFile = MediaManager.copyUriToInternalStorage(context, uri)
-                val originalBmp = MikeAIEngine.decodeSampledBitmap(localFile, maxWidth = 2560, maxHeight = 2560)
+                val maxDim = com.example.util.DeviceOptimizer.getMaxBitmapDimension(context)
+                val originalBmp = MikeAIEngine.decodeSampledBitmap(localFile, maxWidth = maxDim, maxHeight = maxDim)
                 val analysis = MikeAIEngine.analyzeImage(originalBmp)
 
                 _uiState.update {
@@ -250,8 +263,16 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                         originalFile = localFile,
                         detectedScene = analysis.sceneType,
                         currentAnalysis = analysis,
+                        currentParams = EnhancementParams(
+                            preset = it.defaultPreset,
+                            aiIntensity = it.defaultAiIntensity
+                        ),
                         isProcessing = false
                     )
+                }
+
+                if (_uiState.value.autoProcessAfterCapture) {
+                    startEnhanceCapturedPhoto(context)
                 }
             } catch (e: Exception) {
                 _uiState.update {
@@ -300,8 +321,19 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                 val processedBmp = result.processedBitmap
                 val processedFile = MediaManager.saveProcessedBitmapToFile(context, processedBmp, prefix = "ENHANCED")
 
+                // Permanently persist the original file to filesDir if it's currently in cacheDir (temp capture)
+                val finalOriginalFile = if (file.absolutePath.contains(context.cacheDir.absolutePath)) {
+                    try {
+                        MediaManager.persistOriginalFile(context, file)
+                    } catch (e: Exception) {
+                        file // Fallback to current temporary file on any error
+                    }
+                } else {
+                    file
+                }
+
                 val photoRecord = ProcessedPhoto(
-                    originalPath = file.absolutePath,
+                    originalPath = finalOriginalFile.absolutePath,
                     processedPath = processedFile.absolutePath,
                     timestamp = System.currentTimeMillis(),
                     width = processedBmp.width,
@@ -326,7 +358,7 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                         currentScreen = Screen.COMPARISON,
                         originalBitmap = originalBmp,
                         processedBitmap = processedBmp,
-                        originalFile = file,
+                        originalFile = finalOriginalFile,
                         currentPhotoId = insertedId,
                         currentAnalysis = result.analysis,
                         isProcessing = false,
