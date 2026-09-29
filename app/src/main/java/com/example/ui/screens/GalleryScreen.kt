@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.BasicAlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -366,6 +367,51 @@ private fun GalleryPhotoCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
+        }
+
+        // If the item represents a Video capture (Cinematic, SlowMo, Timelapse, Video), show a beautiful play button overlay
+        val isVideo = photo.isVideo || photo.presetName in listOf("CINÉMA", "RALENTI", "ACCÉLÉRÉ", "VIDÉO") || photo.sceneType.startsWith("Vidéo")
+        if (isVideo) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x99000000))
+                    .border(1.2.dp, Color.White.copy(alpha = 0.6f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "Lire la vidéo",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            // Duration badge at bottom-left, right above the date row
+            val durationText = if (photo.videoDurationSeconds > 0) {
+                val mins = photo.videoDurationSeconds / 60
+                val secs = photo.videoDurationSeconds % 60
+                String.format(Locale.US, "%02d:%02d", mins, secs)
+            } else {
+                "00:05" // Fallback duration
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 12.dp, bottom = 34.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0x80000000))
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = durationText,
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         // Overlay Gradient

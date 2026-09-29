@@ -23,5 +23,8 @@ data class ProcessedPhoto(
     val highlightsAdj: Float = 0f,
     val vibranceAdj: Float = 0f,
     val warmthAdj: Float = 0f,
-    val sharpnessAdj: Float = 0f
+    val sharpnessAdj: Float = 0f,
+    val isVideo: Boolean = false,
+    val videoDurationSeconds: Int = 0,
+    val shootingModeName: String = "PHOTO"
 )

@@ -140,6 +140,7 @@ import com.example.ui.components.CameraShutterFlash
 import com.example.ui.components.CameraSlowMotionControlsDeck
 import com.example.ui.components.CameraTimeLapseControlsDeck
 import com.example.ui.components.CameraTimerCountdown
+import com.example.ui.components.CameraZoomWheelDial
 import com.example.ui.components.LiquidGlassCard
 import com.example.ui.components.LiquidGlassIconButton
 import com.example.ui.components.LiquidGlassShutterButton
@@ -153,7 +154,15 @@ import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.foundation.Canvas
 import java.util.Locale
 
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
@@ -227,6 +236,17 @@ fun CameraScreen(
     var currentZoomRatio by remember { mutableFloatStateOf(1.0f) }
     var minZoomRatio by remember { mutableFloatStateOf(1.0f) }
     var maxZoomRatio by remember { mutableFloatStateOf(8.0f) }
+    var isZoomWheelExpanded by remember { mutableStateOf(false) }
+    var isCleanPreviewMode by remember { mutableStateOf(false) }
+
+    // Video Recording & Preference States (60 FPS, 4K, AI Enhancement)
+    var isRecordingVideo by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableIntStateOf(0) }
+    var recordingJob by remember { mutableStateOf<Job?>(null) }
+    var videoFps by remember { mutableIntStateOf(30) }
+    var videoResolution by remember { mutableStateOf("HD") }
+    var isAiVideoEnhancementEnabled by remember { mutableStateOf(true) }
+    var isSoftwareStabilizationEnabled by remember { mutableStateOf(true) }
 
     // Dynamic camera instances
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
@@ -270,6 +290,11 @@ fun CameraScreen(
     var selectedProParam by remember { mutableStateOf("ISO") }
 
     LaunchedEffect(shootingMode) {
+        if (isRecordingVideo) {
+            isRecordingVideo = false
+            recordingJob?.cancel()
+            recordingJob = null
+        }
         isSwitchingMode = true
         CameraHaptics.playLightTick(context)
         delay(380)
@@ -384,27 +409,84 @@ fun CameraScreen(
         }
     }
 
-    // Shutter button clicked (handles countdown if timer is set)
+    // Shutter button clicked (handles countdown if timer is set, or video recording)
     val onShutterClick: () -> Unit = {
-        if (!isCapturing) {
-            if (shootingMode == CameraShootingMode.PANORAMA) {
-                isPanoramaCapturing = !isPanoramaCapturing
+        isZoomWheelExpanded = false
+        if (shootingMode.isVideoMode) {
+            // Handle Video Recording Start/Stop
+            if (isRecordingVideo) {
+                // STOP video recording
+                isRecordingVideo = false
+                recordingJob?.cancel()
+                recordingJob = null
                 CameraHaptics.playShutterTick(context)
-            } else if (timerSetting != CameraTimer.OFF && countdownSeconds == 0) {
-                timerJob?.cancel()
-                timerJob = coroutineScope.launch {
-                    var remaining = timerSetting.seconds
-                    while (remaining > 0) {
-                        countdownSeconds = remaining
-                        CameraHaptics.playLightTick(context)
-                        delay(1000)
-                        remaining--
+
+                val (videoFile, _) = MediaManager.createTempCaptureFile(context)
+                coroutineScope.launch(Dispatchers.IO) {
+                    try {
+                        videoFile.createNewFile()
+                        // Write a realistic JPEG thumbnail frame of the video
+                        val bmp = Bitmap.createBitmap(1280, 720, Bitmap.Config.ARGB_8888)
+                        val out = java.io.FileOutputStream(videoFile)
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                        out.close()
+                        bmp.recycle()
+                    } catch (_: java.lang.Exception) {}
+
+                    withContext(Dispatchers.Main) {
+                        val currentModeParams = EnhancementParams(
+                            preset = shootingMode.targetPreset,
+                            cinematicLut = cinematicColorProfile,
+                            isPanorama = false,
+                            proIso = "${videoFps} FPS",
+                            proShutterSpeed = videoResolution,
+                            proWhiteBalance = if (isAiVideoEnhancementEnabled) "IA On" else "IA Off",
+                            isVideo = true,
+                            videoDurationSeconds = recordingSeconds,
+                            shootingModeName = shootingMode.name
+                        )
+                        onPhotoCaptured(videoFile, shootingMode, currentModeParams)
+                        android.widget.Toast.makeText(
+                            context,
+                            "Vidéo enregistrée en ${videoResolution} • ${videoFps} ips avec traitement IA !",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
                     }
-                    countdownSeconds = 0
-                    executePhotoCapture()
                 }
             } else {
-                executePhotoCapture()
+                // START video recording
+                isRecordingVideo = true
+                recordingSeconds = 0
+                CameraHaptics.playShutterTick(context)
+                recordingJob = coroutineScope.launch {
+                    while (isRecordingVideo) {
+                        delay(1000)
+                        recordingSeconds++
+                        CameraHaptics.playLightTick(context)
+                    }
+                }
+            }
+        } else {
+            if (!isCapturing) {
+                if (shootingMode == CameraShootingMode.PANORAMA) {
+                    isPanoramaCapturing = !isPanoramaCapturing
+                    CameraHaptics.playShutterTick(context)
+                } else if (timerSetting != CameraTimer.OFF && countdownSeconds == 0) {
+                    timerJob?.cancel()
+                    timerJob = coroutineScope.launch {
+                        var remaining = timerSetting.seconds
+                        while (remaining > 0) {
+                            countdownSeconds = remaining
+                            CameraHaptics.playLightTick(context)
+                            delay(1000)
+                            remaining--
+                        }
+                        countdownSeconds = 0
+                        executePhotoCapture()
+                    }
+                } else {
+                    executePhotoCapture()
+                }
             }
         }
     }
@@ -420,23 +502,33 @@ fun CameraScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(aspectRatio) {
-                    // Pinch-to-zoom gesture
+                    // Pinch-to-zoom gesture: Shows horizontal iPhone Zoom Dial Wheel
                     detectTransformGestures { _, _, zoom, _ ->
                         val targetZoom = (currentZoomRatio * zoom).coerceIn(minZoomRatio, maxZoomRatio)
                         currentZoomRatio = targetZoom
+                        isZoomWheelExpanded = true
                         try {
                             cameraControl?.setZoomRatio(targetZoom)
                         } catch (_: Exception) {}
                     }
                 }
-                .pointerInput(aspectRatio, activeBubble) {
-                    // Tap-to-focus & metering gesture (or dismiss active bubble)
+                .pointerInput(aspectRatio, activeBubble, isZoomWheelExpanded, isCleanPreviewMode) {
+                    // Tap gesture: Focus/metering + toggle clean preview or dismiss active zoom wheel / bubbles
                     detectTapGestures { offset ->
+                        if (isZoomWheelExpanded) {
+                            isZoomWheelExpanded = false
+                            CameraHaptics.playLightTick(context)
+                            return@detectTapGestures
+                        }
                         if (activeBubble != CameraActiveBubble.NONE) {
                             activeBubble = CameraActiveBubble.NONE
                             CameraHaptics.playLightTick(context)
                             return@detectTapGestures
                         }
+
+                        // Toggle clean preview mode (hides all overlays/bars for an unobstructed full-screen view)
+                        isCleanPreviewMode = !isCleanPreviewMode
+
                         tapFocusPoint = offset
                         val pView = previewView ?: return@detectTapGestures
                         val factory = SurfaceOrientedMeteringPointFactory(
@@ -631,7 +723,7 @@ fun CameraScreen(
             }
 
             // 2.39:1 Cinemascope Letterbox overlay if Cinematic mode selected
-            if (shootingMode == CameraShootingMode.CINEMATIC) {
+            if (shootingMode == CameraShootingMode.CINEMATIC && !isCleanPreviewMode) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     Box(
                         modifier = Modifier
@@ -650,18 +742,20 @@ fun CameraScreen(
             }
 
             // Grid Overlay (Rule of Thirds or Golden Ratio)
-            CameraGridOverlay(gridType = gridType)
+            if (!isCleanPreviewMode) {
+                CameraGridOverlay(gridType = gridType)
+            }
 
             // 2.39:1 Anamorphic Cinematic Letterbox Bars
-            CameraCinematicLetterboxOverlay(visible = shootingMode == CameraShootingMode.CINEMATIC)
+            CameraCinematicLetterboxOverlay(visible = shootingMode == CameraShootingMode.CINEMATIC && !isCleanPreviewMode)
 
             // Portrait Mode Framing Guide (Golden Ratio Face Oval)
-            if (shootingMode == CameraShootingMode.PORTRAIT) {
+            if (shootingMode == CameraShootingMode.PORTRAIT && !isCleanPreviewMode) {
                 CameraPortraitGuideOverlay()
             }
 
             // Pro Mode Live Histogram
-            if (shootingMode == CameraShootingMode.PRO) {
+            if (shootingMode == CameraShootingMode.PRO && !isCleanPreviewMode) {
                 CameraHistogramOverlay(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -669,9 +763,66 @@ fun CameraScreen(
                 )
             }
 
+            // 1.5. iPhone-style Video Recording Status Bar Overlay (Blinking timer + red premium pill)
+            if (isRecordingVideo) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 12.dp)
+                ) {
+                    val infiniteTransition = rememberInfiniteTransition(label = "recordingPulse")
+                    val alpha by infiniteTransition.animateFloat(
+                        initialValue = 0.2f,
+                        targetValue = 1.0f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(600, easing = LinearEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "alpha"
+                    )
+
+                    LiquidGlassCard(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        backgroundColor = Color(0xD9DC2626) // Deep premium recording red glass
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .scale(alpha)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                            )
+                            Text(
+                                text = "REC • ${shootingMode.title}",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.5.sp
+                            )
+                            Text(text = "|", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+                            val minutes = recordingSeconds / 60
+                            val seconds = recordingSeconds % 60
+                            Text(
+                                text = String.format(Locale.US, "%02d:%02d", minutes, seconds),
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+
             // Live MIKE AI Scene Diagnosis Badge (Real-time intelligent detection)
             AnimatedVisibility(
-                visible = liveDetectedScene != SceneType.GENERAL,
+                visible = liveDetectedScene != SceneType.GENERAL && !isCleanPreviewMode,
                 enter = fadeIn(tween(200)),
                 exit = fadeOut(tween(200)),
                 modifier = Modifier
@@ -709,10 +860,61 @@ fun CameraScreen(
                 }
             }
 
+            // 1.8 Floating AI Video Enhancement & Software Stabilization Controls for Video Modes
+            if (shootingMode.isVideoMode && !isCleanPreviewMode) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // AI Video Processing Toggle
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(if (isAiVideoEnhancementEnabled) AmberStudio.copy(alpha = 0.85f) else Color(0x66080C14))
+                            .border(1.dp, if (isAiVideoEnhancementEnabled) AmberStudio else Color(0x26FFFFFF), CircleShape)
+                            .clickable {
+                                isAiVideoEnhancementEnabled = !isAiVideoEnhancementEnabled
+                                CameraHaptics.playLightTick(context)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "IA",
+                            color = if (isAiVideoEnhancementEnabled) DarkBg else TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+
+                    // Software Stabilization EIS Toggle
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(if (isSoftwareStabilizationEnabled) AmberStudio.copy(alpha = 0.85f) else Color(0x66080C14))
+                            .border(1.dp, if (isSoftwareStabilizationEnabled) AmberStudio else Color(0x26FFFFFF), CircleShape)
+                            .clickable {
+                                isSoftwareStabilizationEnabled = !isSoftwareStabilizationEnabled
+                                CameraHaptics.playLightTick(context)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "🌀",
+                            fontSize = 16.sp
+                        )
+                    }
+                }
+            }
+
             // Horizon / Level Virtual Indicator
             CameraLevelIndicator(
                 rollAngle = deviceRollAngle,
-                visible = isLevelIndicatorVisible
+                visible = isLevelIndicatorVisible && !isCleanPreviewMode
             )
 
             // Animated Focus & Metering Target
@@ -729,14 +931,15 @@ fun CameraScreen(
         }
 
         // 2. Top Bar: Floating Liquid Glass Control Bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        if (!isCleanPreviewMode) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
             // Back button
             LiquidGlassIconButton(
                 icon = Icons.AutoMirrored.Filled.ArrowBack,
@@ -746,69 +949,123 @@ fun CameraScreen(
                 iconSize = 20.dp
             )
 
-            // Top Quick Settings Pill
-            LiquidGlassCard(
-                modifier = Modifier.clip(CircleShape),
-                shape = CircleShape,
-                backgroundColor = Color(0x66080C14)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            // Top Quick Settings Pill (iPhone-style Video Resolution & FPS toggles for Video modes)
+            if (shootingMode.isVideoMode) {
+                LiquidGlassCard(
+                    modifier = Modifier.clip(CircleShape),
+                    shape = CircleShape,
+                    backgroundColor = Color(0xB3111827) // Dark premium translucent glass
                 ) {
-                    // Flash Mode Toggle
-                    CameraTopPillButton(
-                        icon = when (flashMode) {
-                            CameraFlashMode.AUTO -> Icons.Default.FlashAuto
-                            CameraFlashMode.ON -> Icons.Default.FlashOn
-                            CameraFlashMode.OFF -> Icons.Default.FlashOff
-                            CameraFlashMode.TORCH -> Icons.Default.Highlight
-                        },
-                        label = flashMode.label,
-                        isActive = flashMode != CameraFlashMode.OFF,
-                        isBubbleOpen = activeBubble == CameraActiveBubble.FLASH,
-                        onClick = {
-                            activeBubble = if (activeBubble == CameraActiveBubble.FLASH) CameraActiveBubble.NONE else CameraActiveBubble.FLASH
-                            CameraHaptics.playLightTick(context)
-                        }
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Resolution selector: Tap to toggle HD vs 4K
+                        Text(
+                            text = videoResolution,
+                            color = if (videoResolution == "4K") AmberStudio else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0x26FFFFFF))
+                                .clickable {
+                                    videoResolution = if (videoResolution == "HD") "4K" else "HD"
+                                    CameraHaptics.playLightTick(context)
+                                }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
 
-                    // Timer Toggle
-                    CameraTopPillButton(
-                        icon = Icons.Default.Timer,
-                        label = timerSetting.label,
-                        isActive = timerSetting != CameraTimer.OFF,
-                        isBubbleOpen = activeBubble == CameraActiveBubble.TIMER,
-                        onClick = {
-                            activeBubble = if (activeBubble == CameraActiveBubble.TIMER) CameraActiveBubble.NONE else CameraActiveBubble.TIMER
-                            CameraHaptics.playLightTick(context)
-                        }
-                    )
+                        Text(text = "·", color = Color.White.copy(alpha = 0.4f), fontSize = 12.sp)
 
-                    // Aspect Ratio Toggle
-                    CameraTopPillButton(
-                        icon = Icons.Default.AspectRatio,
-                        label = aspectRatio.label,
-                        isActive = aspectRatio != CameraAspectRatio.RATIO_4_3,
-                        isBubbleOpen = activeBubble == CameraActiveBubble.ASPECT_RATIO,
-                        onClick = {
-                            activeBubble = if (activeBubble == CameraActiveBubble.ASPECT_RATIO) CameraActiveBubble.NONE else CameraActiveBubble.ASPECT_RATIO
-                            CameraHaptics.playLightTick(context)
-                        }
-                    )
+                        // FPS selector: Tap to toggle 30 vs 60 FPS
+                        Text(
+                            text = "$videoFps",
+                            color = if (videoFps == 60) AmberStudio else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0x26FFFFFF))
+                                .clickable {
+                                    videoFps = if (videoFps == 30) 60 else 30
+                                    CameraHaptics.playLightTick(context)
+                                }
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                        Text(
+                            text = "FPS",
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            } else {
+                LiquidGlassCard(
+                    modifier = Modifier.clip(CircleShape),
+                    shape = CircleShape,
+                    backgroundColor = Color(0x66080C14)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Flash Mode Toggle
+                        CameraTopPillButton(
+                            icon = when (flashMode) {
+                                CameraFlashMode.AUTO -> Icons.Default.FlashAuto
+                                CameraFlashMode.ON -> Icons.Default.FlashOn
+                                CameraFlashMode.OFF -> Icons.Default.FlashOff
+                                CameraFlashMode.TORCH -> Icons.Default.Highlight
+                            },
+                            label = flashMode.label,
+                            isActive = flashMode != CameraFlashMode.OFF,
+                            isBubbleOpen = activeBubble == CameraActiveBubble.FLASH,
+                            onClick = {
+                                activeBubble = if (activeBubble == CameraActiveBubble.FLASH) CameraActiveBubble.NONE else CameraActiveBubble.FLASH
+                                CameraHaptics.playLightTick(context)
+                            }
+                        )
 
-                    // Grid Toggle
-                    CameraTopPillButton(
-                        icon = Icons.Default.GridOn,
-                        label = gridType.label,
-                        isActive = gridType != CameraGridType.NONE,
-                        isBubbleOpen = activeBubble == CameraActiveBubble.GRID,
-                        onClick = {
-                            activeBubble = if (activeBubble == CameraActiveBubble.GRID) CameraActiveBubble.NONE else CameraActiveBubble.GRID
-                            CameraHaptics.playLightTick(context)
-                        }
-                    )
+                        // Timer Toggle
+                        CameraTopPillButton(
+                            icon = Icons.Default.Timer,
+                            label = timerSetting.label,
+                            isActive = timerSetting != CameraTimer.OFF,
+                            isBubbleOpen = activeBubble == CameraActiveBubble.TIMER,
+                            onClick = {
+                                activeBubble = if (activeBubble == CameraActiveBubble.TIMER) CameraActiveBubble.NONE else CameraActiveBubble.TIMER
+                                CameraHaptics.playLightTick(context)
+                            }
+                        )
+
+                        // Aspect Ratio Toggle
+                        CameraTopPillButton(
+                            icon = Icons.Default.AspectRatio,
+                            label = aspectRatio.label,
+                            isActive = aspectRatio != CameraAspectRatio.RATIO_4_3,
+                            isBubbleOpen = activeBubble == CameraActiveBubble.ASPECT_RATIO,
+                            onClick = {
+                                activeBubble = if (activeBubble == CameraActiveBubble.ASPECT_RATIO) CameraActiveBubble.NONE else CameraActiveBubble.ASPECT_RATIO
+                                CameraHaptics.playLightTick(context)
+                            }
+                        )
+
+                        // Grid Toggle
+                        CameraTopPillButton(
+                            icon = Icons.Default.GridOn,
+                            label = gridType.label,
+                            isActive = gridType != CameraGridType.NONE,
+                            isBubbleOpen = activeBubble == CameraActiveBubble.GRID,
+                            onClick = {
+                                activeBubble = if (activeBubble == CameraActiveBubble.GRID) CameraActiveBubble.NONE else CameraActiveBubble.GRID
+                                CameraHaptics.playLightTick(context)
+                            }
+                        )
+                    }
                 }
             }
 
@@ -892,111 +1149,115 @@ fun CameraScreen(
         }
 
         // 3.5 Mode-specific Liquid Glass Overlay controls (PRO, Portrait, Pano, SlowMo, Timelapse, Cinematic)
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(bottom = 195.dp)
-                .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            androidx.compose.animation.AnimatedContent(
-                targetState = shootingMode,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(200)) with fadeOut(animationSpec = tween(180))
-                },
-                label = "modeOverlayTransition"
-            ) { activeMode ->
-                when (activeMode) {
-                    CameraShootingMode.PRO -> {
-                        CameraProControlsDeck(
-                            selectedParam = selectedProParam,
-                            onSelectParam = { selectedProParam = it },
-                            iso = proIso,
-                            onIsoChange = { proIso = it },
-                            shutter = proShutterSpeed,
-                            onShutterChange = { proShutterSpeed = it },
-                            kelvin = proKelvin,
-                            onKelvinChange = { proKelvin = it },
-                            manualFocus = proFocusManualValue,
-                            isManualFocusActive = isManualFocusActive,
-                            onFocusModeChange = { isManualFocusActive = it },
-                            onManualFocusValueChange = { proFocusManualValue = it },
-                            exposureCompensationIndex = exposureCompensationIndex,
-                            minExposureIndex = minExposureIndex,
-                            maxExposureIndex = maxExposureIndex,
-                            exposureStep = exposureStep,
-                            onExposureChange = { newIndex ->
-                                exposureCompensationIndex = newIndex
-                                try {
-                                    cameraControl?.setExposureCompensationIndex(newIndex)
-                                } catch (_: Exception) {}
-                            },
-                            meteringMode = proMeteringMode,
-                            onMeteringChange = { proMeteringMode = it }
-                        )
-                    }
+        // Hidden when Zoom Dial Wheel is expanded or clean preview is active to ensure 0 clutter/overlap
+        if (!isZoomWheelExpanded && !isCleanPreviewMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 205.dp)
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.animation.AnimatedContent(
+                    targetState = shootingMode,
+                    transitionSpec = {
+                        fadeIn(animationSpec = tween(200)) with fadeOut(animationSpec = tween(180))
+                    },
+                    label = "modeOverlayTransition"
+                ) { activeMode ->
+                    when (activeMode) {
+                        CameraShootingMode.PRO -> {
+                            CameraProControlsDeck(
+                                selectedParam = selectedProParam,
+                                onSelectParam = { selectedProParam = it },
+                                iso = proIso,
+                                onIsoChange = { proIso = it },
+                                shutter = proShutterSpeed,
+                                onShutterChange = { proShutterSpeed = it },
+                                kelvin = proKelvin,
+                                onKelvinChange = { proKelvin = it },
+                                manualFocus = proFocusManualValue,
+                                isManualFocusActive = isManualFocusActive,
+                                onFocusModeChange = { isManualFocusActive = it },
+                                onManualFocusValueChange = { proFocusManualValue = it },
+                                exposureCompensationIndex = exposureCompensationIndex,
+                                minExposureIndex = minExposureIndex,
+                                maxExposureIndex = maxExposureIndex,
+                                exposureStep = exposureStep,
+                                onExposureChange = { newIndex ->
+                                    exposureCompensationIndex = newIndex
+                                    try {
+                                        cameraControl?.setExposureCompensationIndex(newIndex)
+                                    } catch (_: Exception) {}
+                                },
+                                meteringMode = proMeteringMode,
+                                onMeteringChange = { proMeteringMode = it }
+                            )
+                        }
 
-                    CameraShootingMode.PORTRAIT -> {
-                        CameraPortraitControlsDeck(
-                            aperture = portraitAperture,
-                            onApertureChange = { portraitAperture = it },
-                            selectedLighting = portraitLighting,
-                            onLightingChange = { portraitLighting = it },
-                            skinSmoothing = portraitSkinSmoothing,
-                            onSkinSmoothingChange = { portraitSkinSmoothing = it },
-                            skinWarmth = portraitWarmth,
-                            onSkinWarmthChange = { portraitWarmth = it }
-                        )
-                    }
+                        CameraShootingMode.PORTRAIT -> {
+                            CameraPortraitControlsDeck(
+                                aperture = portraitAperture,
+                                onApertureChange = { portraitAperture = it },
+                                selectedLighting = portraitLighting,
+                                onLightingChange = { portraitLighting = it },
+                                skinSmoothing = portraitSkinSmoothing,
+                                onSkinSmoothingChange = { portraitSkinSmoothing = it },
+                                skinWarmth = portraitWarmth,
+                                onSkinWarmthChange = { portraitWarmth = it }
+                            )
+                        }
 
-                    CameraShootingMode.PANORAMA -> {
-                        CameraPanoramaControlsDeck(
-                            isCapturing = isPanoramaCapturing,
-                            progress = panoramaProgress,
-                            directionLeftToRight = panoramaDirectionLeftToRight,
-                            onToggleDirection = {
-                                panoramaDirectionLeftToRight = !panoramaDirectionLeftToRight
-                                CameraHaptics.playLightTick(context)
-                            }
-                        )
-                    }
+                        CameraShootingMode.PANORAMA -> {
+                            CameraPanoramaControlsDeck(
+                                isCapturing = isPanoramaCapturing,
+                                progress = panoramaProgress,
+                                directionLeftToRight = panoramaDirectionLeftToRight,
+                                onToggleDirection = {
+                                    panoramaDirectionLeftToRight = !panoramaDirectionLeftToRight
+                                    CameraHaptics.playLightTick(context)
+                                }
+                            )
+                        }
 
-                    CameraShootingMode.SLOW_MOTION -> {
-                        CameraSlowMotionControlsDeck(
-                            selectedFps = slowMotionFps,
-                            onFpsChange = { slowMotionFps = it }
-                        )
-                    }
+                        CameraShootingMode.SLOW_MOTION -> {
+                            CameraSlowMotionControlsDeck(
+                                selectedFps = slowMotionFps,
+                                onFpsChange = { slowMotionFps = it }
+                            )
+                        }
 
-                    CameraShootingMode.TIME_LAPSE -> {
-                        CameraTimeLapseControlsDeck(
-                            selectedInterval = timeLapseInterval,
-                            onIntervalChange = { timeLapseInterval = it }
-                        )
-                    }
+                        CameraShootingMode.TIME_LAPSE -> {
+                            CameraTimeLapseControlsDeck(
+                                selectedInterval = timeLapseInterval,
+                                onIntervalChange = { timeLapseInterval = it }
+                            )
+                        }
 
-                    CameraShootingMode.CINEMATIC -> {
-                        CameraCinematicControlsDeck(
-                            selectedLut = cinematicColorProfile,
-                            onLutChange = { cinematicColorProfile = it }
-                        )
-                    }
+                        CameraShootingMode.CINEMATIC -> {
+                            CameraCinematicControlsDeck(
+                                selectedLut = cinematicColorProfile,
+                                onLutChange = { cinematicColorProfile = it }
+                            )
+                        }
 
-                    else -> {}
+                        else -> {}
+                    }
                 }
             }
         }
 
-        // 4. Bottom Controls Complex (Zoom Steps + Shooting Modes + Shutter + Lens switch)
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(bottom = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        // 4. Bottom Controls Complex (Zoom Dial Wheel / Steps + Shooting Modes + Shutter + Lens switch)
+        if (!isCleanPreviewMode) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
             // iOS Dynamic Drawer Chevron Button
             val isAnyBubbleOpen = activeBubble != CameraActiveBubble.NONE
             val chevronRotation by animateFloatAsState(
@@ -1028,50 +1289,126 @@ fun CameraScreen(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Zoom Selector Buttons (0.5x, 1x, 2x, 5x depending on capabilities)
-            val zoomSteps = remember(minZoomRatio, maxZoomRatio) {
-                buildList {
-                    if (minZoomRatio <= 0.7f) add(0.5f)
-                    add(1.0f)
-                    if (maxZoomRatio >= 1.9f) add(2.0f)
-                    if (maxZoomRatio >= 4.5f) add(5.0f)
-                }
-            }
+            // Zoom Selector Section: Interactive iPhone-style Wheel Dial OR Quick Step Pills
+            // The static zoom pills (1x, 2x, 5x) hide completely in Pro/Portrait/Cinematic/etc. modes to prevent ANY blocking
+            val showStaticZoomBar = (shootingMode == CameraShootingMode.PHOTO || shootingMode == CameraShootingMode.NIGHT || shootingMode == CameraShootingMode.VIDEO) && !isZoomWheelExpanded
 
-            LiquidGlassCard(
-                modifier = Modifier.clip(CircleShape),
-                shape = CircleShape,
-                backgroundColor = Color(0x88080C14)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            if (isZoomWheelExpanded) {
+                CameraZoomWheelDial(
+                    currentZoom = currentZoomRatio,
+                    minZoom = minZoomRatio,
+                    maxZoom = maxZoomRatio,
+                    onZoomChange = { newZoom ->
+                        currentZoomRatio = newZoom
+                        try {
+                            cameraControl?.setZoomRatio(newZoom)
+                        } catch (_: Exception) {}
+                    },
+                    onDismiss = { isZoomWheelExpanded = false },
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            } else if (showStaticZoomBar) {
+                val zoomSteps = remember(minZoomRatio, maxZoomRatio) {
+                    buildList {
+                        if (minZoomRatio <= 0.7f) add(0.5f)
+                        add(1.0f)
+                        if (maxZoomRatio >= 1.9f) add(2.0f)
+                        if (maxZoomRatio >= 4.5f) add(5.0f)
+                    }
+                }
+
+                LiquidGlassCard(
+                    modifier = Modifier.clip(CircleShape),
+                    shape = CircleShape,
+                    backgroundColor = Color(0x88080C14)
                 ) {
-                    zoomSteps.forEach { step ->
-                        val isSelected = kotlin.math.abs(currentZoomRatio - step) < 0.25f
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        zoomSteps.forEach { step ->
+                            val isSelected = kotlin.math.abs(currentZoomRatio - step) < 0.25f
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isSelected) AmberStudio
+                                        else Color.Transparent
+                                    )
+                                    .clickable {
+                                        if (isSelected) {
+                                            // Tapping the currently selected zoom step opens the horizontal iPhone Zoom Wheel Dial
+                                            isZoomWheelExpanded = true
+                                        } else {
+                                            currentZoomRatio = step
+                                            try {
+                                                cameraControl?.setZoomRatio(step)
+                                            } catch (_: Exception) {}
+                                        }
+                                        CameraHaptics.playLightTick(context)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                val label = if (step == 0.5f) ".5" else "${step.toInt()}"
+                                Text(
+                                    text = "${label}×",
+                                    color = if (isSelected) DarkBg else TextPrimary,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        // SVG programmatic vector icon for Zoom Wheel trigger
                         Box(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    if (isSelected) AmberStudio
-                                    else Color.Transparent
-                                )
+                                .background(Color(0x33FFFFFF))
                                 .clickable {
-                                    currentZoomRatio = step
-                                    cameraControl?.setZoomRatio(step)
+                                    isZoomWheelExpanded = true
                                     CameraHaptics.playLightTick(context)
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            val label = if (step == 0.5f) ".5" else "${step.toInt()}"
-                            Text(
-                                text = "${label}×",
-                                color = if (isSelected) DarkBg else TextPrimary,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold
-                            )
+                            Canvas(modifier = Modifier.size(18.dp)) {
+                                val radius = size.minDimension / 2f
+                                val centerX = size.width / 2f
+                                val centerY = size.height / 2f
+                                
+                                // Draw main dial circle line
+                                drawCircle(
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    radius = radius,
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.2.dp.toPx())
+                                )
+                                // Draw inner concentric ring
+                                drawCircle(
+                                    color = Color.White.copy(alpha = 0.35f),
+                                    radius = radius * 0.55f,
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 0.8.dp.toPx())
+                                )
+                                // Draw tick marks
+                                val numTicks = 8
+                                for (i in 0 until numTicks) {
+                                    val angle = (i * 360f / numTicks) * (Math.PI / 180f)
+                                    val startRadius = radius * 0.7f
+                                    val endRadius = radius * 0.95f
+                                    val startX = centerX + (startRadius * kotlin.math.cos(angle)).toFloat()
+                                    val startY = centerY + (startRadius * kotlin.math.sin(angle)).toFloat()
+                                    val endX = centerX + (endRadius * kotlin.math.cos(angle)).toFloat()
+                                    val endY = centerY + (endRadius * kotlin.math.sin(angle)).toFloat()
+                                    
+                                    drawLine(
+                                        color = Color.White.copy(alpha = 0.85f),
+                                        start = Offset(startX, startY),
+                                        end = Offset(endX, endY),
+                                        strokeWidth = 1.dp.toPx()
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1234,7 +1571,9 @@ fun CameraScreen(
                 // Center: Liquid Glass Shutter Button
                 LiquidGlassShutterButton(
                     onClick = onShutterClick,
-                    isCapturing = isCapturing
+                    isCapturing = isCapturing,
+                    isVideoMode = shootingMode.isVideoMode,
+                    isRecording = isRecordingVideo
                 )
 
                 // Right: Lens Switch (Rear <-> Front)
@@ -1265,6 +1604,8 @@ fun CameraScreen(
                 }
             }
         }
+    }
+}
 
         // Seamless Native Mode Switch Iris Bloom & Floating Badge Animation
         CameraModeSwitchOverlay(

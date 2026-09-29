@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.Icon
@@ -335,19 +336,21 @@ fun CameraTimerCountdown(
 }
 
 /**
- * Liquid Glass Shutter Button (iOS 27 inspired with concentric glass ripples)
+ * Liquid Glass Shutter Button (iOS inspired with concentric glass ripples)
  */
 @Composable
 fun LiquidGlassShutterButton(
     onClick: () -> Unit,
     isCapturing: Boolean,
+    isVideoMode: Boolean = false,
+    isRecording: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
 
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.90f else if (isCapturing) 0.85f else 1.0f,
+        targetValue = if (isPressed) 0.90f else if (isCapturing || isRecording) 0.85f else 1.0f,
         animationSpec = tween(120),
         label = "shutterScale"
     )
@@ -391,21 +394,32 @@ fun LiquidGlassShutterButton(
                 .border(1.dp, Color(0x33000000), CircleShape)
         )
 
-        // Center Solid Shutter Core with Amber/White sheen
+        // Center Solid Shutter Core
+        val shape = if (isVideoMode && isRecording) RoundedCornerShape(12.dp) else CircleShape
+        val coreSize = if (isVideoMode && isRecording) 28.dp else if (isCapturing) 38.dp else 60.dp
+        val coreColor = if (isVideoMode) {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFEF4444), // iOS Red
+                    Color(0xFFDC2626)
+                )
+            )
+        } else {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White,
+                    Color(0xFFF1F5F9),
+                    Color(0xFFE2E8F0)
+                )
+            )
+        }
+
         Box(
             modifier = Modifier
-                .size(if (isCapturing) 38.dp else 60.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.linearGradient(
-                        colors = listOf(
-                            Color.White,
-                            Color(0xFFF1F5F9),
-                            Color(0xFFE2E8F0)
-                        )
-                    )
-                )
-                .border(1.dp, Color.White, CircleShape)
+                .size(coreSize)
+                .clip(shape)
+                .background(coreColor)
+                .border(1.dp, if (isVideoMode) Color(0x33000000) else Color.White, shape)
         )
     }
 }

@@ -355,7 +355,10 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                     highlightsAdj = params.highlights,
                     vibranceAdj = params.vibrance,
                     warmthAdj = params.warmth,
-                    sharpnessAdj = params.sharpness
+                    sharpnessAdj = params.sharpness,
+                    isVideo = params.isVideo,
+                    videoDurationSeconds = params.videoDurationSeconds,
+                    shootingModeName = params.shootingModeName
                 )
                 val insertedId = repository.insertPhoto(photoRecord)
 

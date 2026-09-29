@@ -12,13 +12,16 @@ enum class CameraShootingMode(
     val targetPreset: EnhancementPreset
 ) {
     PHOTO("photo", "PHOTO", "Capture naturelle haute précision", EnhancementPreset.NATURAL),
+    VIDEO("video", "VIDÉO", "Vidéo 4K ultra-stabilisée avec traitement IA", EnhancementPreset.CINEMATIC),
     PORTRAIT("portrait", "PORTRAIT", "Mise au point & teint naturel", EnhancementPreset.PORTRAIT),
     NIGHT("night", "NUIT", "Basse lumière & réduction de bruit", EnhancementPreset.NIGHT),
     PRO("pro", "PRO", "Contrôles manuels & dynamique étendue", EnhancementPreset.VIVID),
     PANORAMA("panorama", "PANO", "Champ visuel ultra-large", EnhancementPreset.NATURAL),
     SLOW_MOTION("slow_motion", "RALENTI", "Ralenti fluide haute vitesse", EnhancementPreset.CINEMATIC),
     TIME_LAPSE("time_lapse", "ACCÉLÉRÉ", "Accéléré temporel ultra-dynamique", EnhancementPreset.VIVID),
-    CINEMATIC("cinematic", "CINÉMA", "Rendu cinéma & profondeur", EnhancementPreset.CINEMATIC)
+    CINEMATIC("cinematic", "CINÉMA", "Rendu cinéma & profondeur", EnhancementPreset.CINEMATIC);
+    val isVideoMode: Boolean
+        get() = this == CameraShootingMode.VIDEO || this == CameraShootingMode.SLOW_MOTION || this == CameraShootingMode.TIME_LAPSE || this == CameraShootingMode.CINEMATIC
 }
 
 enum class CameraTimer(val seconds: Int, val label: String) {

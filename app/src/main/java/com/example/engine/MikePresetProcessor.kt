@@ -117,7 +117,10 @@ data class EnhancementParams(
     val proShutterSpeed: String = "Auto",
     val proWhiteBalance: String = "Auto",
     val cinematicLut: String = "",
-    val isPanorama: Boolean = false
+    val isPanorama: Boolean = false,
+    val isVideo: Boolean = false,
+    val videoDurationSeconds: Int = 0,
+    val shootingModeName: String = "PHOTO"
 )
 
 object MikePresetProcessor {
