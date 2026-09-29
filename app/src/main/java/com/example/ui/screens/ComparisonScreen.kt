@@ -116,6 +116,7 @@ fun ComparisonScreen(
         warmth: Float?,
         sharpness: Float?
     ) -> Unit,
+    onResetAdjustments: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -362,9 +363,7 @@ fun ComparisonScreen(
                     params = currentParams,
                     onDismiss = { showAdjustSheet = false },
                     onAdjustmentChange = onAdjustmentsChange,
-                    onReset = {
-                        onPresetSelected(currentParams.preset)
-                    }
+                    onReset = onResetAdjustments
                 )
             }
 

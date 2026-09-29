@@ -59,7 +59,14 @@ object MediaManager {
 
     suspend fun copyUriToInternalStorage(context: Context, sourceUri: Uri): File = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val destFile = File(getPhotosDir(context), "ORIGINAL_${timeStamp}.jpg")
+        val mimeType = context.contentResolver.getType(sourceUri)
+        val ext = when {
+            mimeType?.contains("png", ignoreCase = true) == true -> "png"
+            mimeType?.contains("webp", ignoreCase = true) == true -> "webp"
+            mimeType?.contains("heic", ignoreCase = true) == true || mimeType?.contains("heif", ignoreCase = true) == true -> "heic"
+            else -> "jpg"
+        }
+        val destFile = File(getPhotosDir(context), "ORIGINAL_${timeStamp}.${ext}")
 
         context.contentResolver.openInputStream(sourceUri)?.use { input ->
             FileOutputStream(destFile).use { output ->
@@ -67,13 +74,15 @@ object MediaManager {
             }
         } ?: throw IllegalStateException("Impossible de lire le flux de l'image source.")
 
-        normalizeImageOrientation(destFile)
+        // Original file is preserved 100% intact with its genuine bytes and EXIF tags.
+        // Memory-safe EXIF orientation is handled during decode in MikeAIEngine.decodeSampledBitmap.
         destFile
     }
 
     suspend fun persistOriginalFile(context: Context, sourceFile: File): File = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val destFile = File(getPhotosDir(context), "ORIGINAL_${timeStamp}.jpg")
+        val ext = sourceFile.extension.ifEmpty { "jpg" }
+        val destFile = File(getPhotosDir(context), "ORIGINAL_${timeStamp}.${ext}")
         if (sourceFile.exists()) {
             sourceFile.inputStream().use { input ->
                 destFile.outputStream().use { output ->
@@ -86,97 +95,68 @@ object MediaManager {
         destFile
     }
 
-    suspend fun saveProcessedBitmapToFile(context: Context, bitmap: Bitmap, prefix: String = "PROC"): File = withContext(Dispatchers.IO) {
+    suspend fun saveProcessedBitmapToFile(
+        context: Context,
+        bitmap: Bitmap,
+        prefix: String = "PROC",
+        originalFile: File? = null
+    ): File = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val file = File(getPhotosDir(context), "${prefix}_${timeStamp}.jpg")
         FileOutputStream(file).use { out ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 96, out)
         }
+
+        // Write clear, consistent EXIF metadata on the processed result
+        try {
+            val exif = ExifInterface(file.absolutePath)
+            exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+            exif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, bitmap.width.toString())
+            exif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, bitmap.height.toString())
+            exif.setAttribute(ExifInterface.TAG_SOFTWARE, "MIKE AI PHOTO")
+            val dateStr = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date())
+            exif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
+
+            // Safely propagate non-spatial camera/device tags from original if available
+            if (originalFile != null && originalFile.exists()) {
+                val origExif = ExifInterface(originalFile.absolutePath)
+                origExif.getAttribute(ExifInterface.TAG_MAKE)?.let { exif.setAttribute(ExifInterface.TAG_MAKE, it) }
+                origExif.getAttribute(ExifInterface.TAG_MODEL)?.let { exif.setAttribute(ExifInterface.TAG_MODEL, it) }
+                origExif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)?.let { exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, it) }
+                origExif.getAttribute(ExifInterface.TAG_FOCAL_LENGTH)?.let { exif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, it) }
+                origExif.getAttribute(ExifInterface.TAG_FLASH)?.let { exif.setAttribute(ExifInterface.TAG_FLASH, it) }
+                origExif.getAttribute(ExifInterface.TAG_WHITE_BALANCE)?.let { exif.setAttribute(ExifInterface.TAG_WHITE_BALANCE, it) }
+                origExif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)?.let { exif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, it) }
+                origExif.getAttribute(ExifInterface.TAG_F_NUMBER)?.let { exif.setAttribute(ExifInterface.TAG_F_NUMBER, it) }
+                origExif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)?.let { exif.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, it) }
+            }
+            exif.saveAttributes()
+        } catch (_: Exception) {}
+
         file
     }
 
+    /**
+     * Preserved for backward compatibility. In-memory orientation normalization is
+     * handled non-destructively in MikeAIEngine.decodeSampledBitmap.
+     */
     fun normalizeImageOrientation(file: File) {
-        try {
-            val exif = ExifInterface(file.absolutePath)
-            val orientation = exif.getAttributeInt(
-                ExifInterface.TAG_ORIENTATION,
-                ExifInterface.ORIENTATION_NORMAL
-            )
-
-            // Skip if orientation is already standard or undefined
-            if (orientation == ExifInterface.ORIENTATION_NORMAL ||
-                orientation == ExifInterface.ORIENTATION_UNDEFINED
-            ) {
-                return
-            }
-
-            val matrix = Matrix()
-            when (orientation) {
-                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
-                ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
-                ExifInterface.ORIENTATION_TRANSPOSE -> {
-                    matrix.postRotate(90f)
-                    matrix.postScale(-1f, 1f)
-                }
-                ExifInterface.ORIENTATION_TRANSVERSE -> {
-                    matrix.postRotate(270f)
-                    matrix.postScale(-1f, 1f)
-                }
-                else -> return
-            }
-
-            // Inspect bounds first to prevent decoding 48MP raw images into unconstrained RAM
-            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
-
-            val maxDimension = 2048
-            var inSampleSize = 1
-            val origWidth = boundsOptions.outWidth
-            val origHeight = boundsOptions.outHeight
-            if (origHeight > maxDimension || origWidth > maxDimension) {
-                val halfHeight = origHeight / 2
-                val halfWidth = origWidth / 2
-                while ((halfHeight / inSampleSize) >= maxDimension && (halfWidth / inSampleSize) >= maxDimension) {
-                    inSampleSize *= 2
-                }
-            }
-
-            val decodeOptions = BitmapFactory.Options().apply {
-                this.inSampleSize = inSampleSize
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-                inMutable = false
-            }
-
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return
-            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            FileOutputStream(file).use { out ->
-                rotated.compress(Bitmap.CompressFormat.JPEG, 95, out)
-            }
-
-            // Update EXIF tag to normal
-            val newExif = ExifInterface(file.absolutePath)
-            newExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-            newExif.saveAttributes()
-
-            if (rotated != bitmap) {
-                rotated.recycle()
-            }
-            bitmap.recycle()
-        } catch (_: OutOfMemoryError) {
-            System.gc()
-        } catch (_: Exception) {}
+        // Intentionally non-destructive to guarantee original files and EXIF metadata remain intact
     }
 
-    suspend fun saveToDeviceGallery(context: Context, bitmap: Bitmap, titleSuffix: String = "MIKE_AI"): Uri? = withContext(Dispatchers.IO) {
+    suspend fun saveToDeviceGallery(
+        context: Context,
+        bitmap: Bitmap,
+        titleSuffix: String = "MIKE_AI",
+        originalFile: File? = null
+    ): Uri? = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val filename = "MIKE_AI_${timeStamp}.jpg"
 
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, filename)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.ORIENTATION, 0)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MikeAiPhoto")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -199,6 +179,32 @@ object MediaManager {
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    context.contentResolver.openFileDescriptor(itemUri, "rw")?.use { pfd ->
+                        val galleryExif = ExifInterface(pfd.fileDescriptor)
+                        galleryExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                        galleryExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, bitmap.width.toString())
+                        galleryExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, bitmap.height.toString())
+                        galleryExif.setAttribute(ExifInterface.TAG_SOFTWARE, "MIKE AI PHOTO")
+                        val dateStr = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date())
+                        galleryExif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
+
+                        if (originalFile != null && originalFile.exists()) {
+                            val origExif = ExifInterface(originalFile.absolutePath)
+                            origExif.getAttribute(ExifInterface.TAG_MAKE)?.let { galleryExif.setAttribute(ExifInterface.TAG_MAKE, it) }
+                            origExif.getAttribute(ExifInterface.TAG_MODEL)?.let { galleryExif.setAttribute(ExifInterface.TAG_MODEL, it) }
+                            origExif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)?.let { galleryExif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, it) }
+                            origExif.getAttribute(ExifInterface.TAG_FOCAL_LENGTH)?.let { galleryExif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, it) }
+                            origExif.getAttribute(ExifInterface.TAG_FLASH)?.let { galleryExif.setAttribute(ExifInterface.TAG_FLASH, it) }
+                            origExif.getAttribute(ExifInterface.TAG_WHITE_BALANCE)?.let { galleryExif.setAttribute(ExifInterface.TAG_WHITE_BALANCE, it) }
+                            origExif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)?.let { galleryExif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, it) }
+                            origExif.getAttribute(ExifInterface.TAG_F_NUMBER)?.let { galleryExif.setAttribute(ExifInterface.TAG_F_NUMBER, it) }
+                            origExif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)?.let { galleryExif.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, it) }
+                        }
+                        galleryExif.saveAttributes()
+                    }
+                } catch (_: Exception) {}
+
                 values.clear()
                 values.put(MediaStore.Images.Media.IS_PENDING, 0)
                 context.contentResolver.update(itemUri, values, null, null)

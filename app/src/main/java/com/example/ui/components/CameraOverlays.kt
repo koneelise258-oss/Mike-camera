@@ -352,17 +352,6 @@ fun LiquidGlassShutterButton(
         label = "shutterScale"
     )
 
-    val infiniteTransition = rememberInfiniteTransition(label = "shutterBreathing")
-    val breathRing by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1800, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "shutterRing"
-    )
-
     Box(
         modifier = modifier
             .size(86.dp)
@@ -380,7 +369,6 @@ fun LiquidGlassShutterButton(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .scale(breathRing)
                 .clip(CircleShape)
                 .background(
                     Brush.radialGradient(

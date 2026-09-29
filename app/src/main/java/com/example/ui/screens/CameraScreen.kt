@@ -11,19 +11,29 @@ import androidx.camera.core.CameraControl
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.with
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -84,6 +94,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -107,11 +118,27 @@ import com.example.camera.CameraShootingMode
 import com.example.camera.CameraTimer
 import com.example.camera.rememberDeviceRollAngle
 import com.example.data.model.ProcessedPhoto
+import com.example.engine.EnhancementParams
+import com.example.engine.EnhancementPreset
 import com.example.engine.MediaManager
+import com.example.engine.MikeAIEngine
+import com.example.engine.MikeImageAnalyzer
+import com.example.engine.SceneType
+import com.example.ui.components.CameraCinematicControlsDeck
+import com.example.ui.components.CameraCinematicLetterboxOverlay
 import com.example.ui.components.CameraFocusTarget
 import com.example.ui.components.CameraGridOverlay
+import com.example.ui.components.CameraHistogramOverlay
 import com.example.ui.components.CameraLevelIndicator
+import com.example.ui.components.CameraModeSwitchOverlay
+import com.example.ui.components.CameraPanoramaControlsDeck
+import com.example.ui.components.CameraPortraitControlsDeck
+import com.example.ui.components.CameraPortraitGuideOverlay
+import com.example.ui.components.CameraProControlsDeck
+import com.example.ui.components.CameraProHudBar
 import com.example.ui.components.CameraShutterFlash
+import com.example.ui.components.CameraSlowMotionControlsDeck
+import com.example.ui.components.CameraTimeLapseControlsDeck
 import com.example.ui.components.CameraTimerCountdown
 import com.example.ui.components.LiquidGlassCard
 import com.example.ui.components.LiquidGlassIconButton
@@ -133,7 +160,7 @@ import java.util.Locale
 @Composable
 fun CameraScreen(
     latestPhoto: ProcessedPhoto?,
-    onPhotoCaptured: (File, CameraShootingMode) -> Unit,
+    onPhotoCaptured: (File, CameraShootingMode, EnhancementParams) -> Unit,
     onOpenGallery: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -170,14 +197,17 @@ fun CameraScreen(
     // Pro Mode Manual Settings
     var proIso by remember { mutableStateOf("Auto") }
     var proShutterSpeed by remember { mutableStateOf("Auto") }
-    var proWhiteBalance by remember { mutableStateOf("Auto") }
-    var proFocusMode by remember { mutableStateOf("Auto") }
+    var proKelvin by remember { mutableIntStateOf(5500) }
     var proFocusManualValue by remember { mutableFloatStateOf(0.5f) }
+    var isManualFocusActive by remember { mutableStateOf(false) }
+    var proMeteringMode by remember { mutableStateOf("Matrice") }
+    var isRawCapture by remember { mutableStateOf(false) }
 
     // Portrait Mode Manual Settings
     var portraitAperture by remember { mutableStateOf("f/2.8") }
-    var portraitSkinSmoothing by remember { mutableFloatStateOf(30f) }
-    var portraitWarmth by remember { mutableFloatStateOf(20f) }
+    var portraitLighting by remember { mutableStateOf("Naturel") }
+    var portraitSkinSmoothing by remember { mutableFloatStateOf(35f) }
+    var portraitWarmth by remember { mutableFloatStateOf(25f) }
 
     // Panorama Mode State
     var isPanoramaCapturing by remember { mutableStateOf(false) }
@@ -211,6 +241,19 @@ fun CameraScreen(
     var countdownSeconds by remember { mutableIntStateOf(0) }
     var timerJob by remember { mutableStateOf<Job?>(null) }
 
+    // Background Frame Analysis executor (Offline Local Live Diagnosis)
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val isAnalyzingFrame = remember { AtomicBoolean(false) }
+    var lastAnalysisTime by remember { mutableStateOf(0L) }
+    var liveDetectedScene by remember { mutableStateOf(SceneType.GENERAL) }
+    var sceneHistory by remember { mutableStateOf(listOf<SceneType>()) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            analysisExecutor.shutdown()
+        }
+    }
+
     // Device Tilt Roll Sensor for Virtual Level
     val deviceRollAngle by rememberDeviceRollAngle(enabled = isLevelIndicatorVisible)
 
@@ -228,7 +271,8 @@ fun CameraScreen(
 
     LaunchedEffect(shootingMode) {
         isSwitchingMode = true
-        delay(280)
+        CameraHaptics.playLightTick(context)
+        delay(380)
         isSwitchingMode = false
     }
 
@@ -251,13 +295,79 @@ fun CameraScreen(
 
                 val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
+                val currentModeParams = when (shootingMode) {
+                    CameraShootingMode.PRO -> {
+                        val kelvinWarmth = ((proKelvin - 5500) / 4000f).coerceIn(-0.35f, 0.35f)
+                        val evExp = (exposureCompensationIndex * exposureStep) * 0.15f
+                        EnhancementParams(
+                            preset = EnhancementPreset.NATURAL,
+                            exposure = evExp,
+                            warmth = kelvinWarmth,
+                            proIso = proIso,
+                            proShutterSpeed = proShutterSpeed,
+                            proWhiteBalance = "${proKelvin}K"
+                        )
+                    }
+                    CameraShootingMode.PORTRAIT -> {
+                        val apertureFloat = when (portraitAperture) {
+                            "f/1.4" -> 1.4f
+                            "f/2.0" -> 2.0f
+                            "f/2.8" -> 2.8f
+                            "f/4.0" -> 4.0f
+                            "f/8.0" -> 8.0f
+                            else -> 16.0f
+                        }
+                        EnhancementParams(
+                            preset = EnhancementPreset.PORTRAIT,
+                            portraitAperture = apertureFloat,
+                            portraitSkinSmoothing = portraitSkinSmoothing,
+                            portraitLighting = portraitLighting,
+                            warmth = (portraitWarmth / 100f) * 0.12f
+                        )
+                    }
+                    CameraShootingMode.CINEMATIC -> {
+                        EnhancementParams(
+                            preset = EnhancementPreset.CINEMATIC,
+                            cinematicLut = cinematicColorProfile
+                        )
+                    }
+                    CameraShootingMode.PANORAMA -> {
+                        EnhancementParams(
+                            preset = EnhancementPreset.NATURAL,
+                            isPanorama = true
+                        )
+                    }
+                    CameraShootingMode.SLOW_MOTION -> {
+                        EnhancementParams(
+                            preset = EnhancementPreset.CINEMATIC,
+                            sharpness = 0.45f
+                        )
+                    }
+                    CameraShootingMode.TIME_LAPSE -> {
+                        EnhancementParams(
+                            preset = EnhancementPreset.VIVID,
+                            contrast = 0.22f
+                        )
+                    }
+                    CameraShootingMode.NIGHT -> {
+                        EnhancementParams(
+                            preset = EnhancementPreset.NIGHT
+                        )
+                    }
+                    else -> {
+                        EnhancementParams(
+                            preset = EnhancementPreset.NATURAL
+                        )
+                    }
+                }
+
                 capture.takePicture(
                     outputOptions,
                     ContextCompat.getMainExecutor(context),
                     object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                             isCapturing = false
-                            onPhotoCaptured(photoFile, shootingMode)
+                            onPhotoCaptured(photoFile, shootingMode, currentModeParams)
                         }
 
                         override fun onError(exception: ImageCaptureException) {
@@ -389,6 +499,51 @@ fun CameraScreen(
                             .build()
                         imageCapture = capture
 
+                        val imageAnalysis = ImageAnalysis.Builder()
+                            .setTargetAspectRatio(aspectRatio.ratioValue)
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                            .build()
+
+                        imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                            try {
+                                val now = System.currentTimeMillis()
+                                if (now - lastAnalysisTime >= 250 && isAnalyzingFrame.compareAndSet(false, true)) {
+                                    lastAnalysisTime = now
+                                    val bmp = imageProxy.toBitmap()
+                                    val scaled = if (bmp.width > 120 || bmp.height > 120) {
+                                        Bitmap.createScaledBitmap(bmp, 100, 100, false)
+                                    } else {
+                                        bmp
+                                    }
+                                    val analysis = MikeImageAnalyzer.analyzeDirect(scaled)
+                                    val liveModeParams = when (shootingMode) {
+                                        CameraShootingMode.PORTRAIT -> EnhancementParams(preset = EnhancementPreset.PORTRAIT)
+                                        CameraShootingMode.NIGHT -> EnhancementParams(preset = EnhancementPreset.NIGHT)
+                                        CameraShootingMode.CINEMATIC -> EnhancementParams(preset = EnhancementPreset.CINEMATIC)
+                                        else -> EnhancementParams(preset = EnhancementPreset.NATURAL)
+                                    }
+                                    val liveEnhanced = MikeAIEngine.processLivePreview(scaled, liveModeParams, analysis)
+                                    liveEnhanced.recycle()
+                                    if (scaled != bmp) scaled.recycle()
+                                    bmp.recycle()
+
+                                    val newScene = analysis.sceneType
+                                    val updatedHistory = (sceneHistory + newScene).takeLast(3)
+                                    sceneHistory = updatedHistory
+                                    val matchesCount = updatedHistory.filter { scene -> scene == newScene }.size
+                                    if (matchesCount >= 2) {
+                                        liveDetectedScene = newScene
+                                    }
+                                    isAnalyzingFrame.set(false)
+                                }
+                            } catch (_: Exception) {
+                                isAnalyzingFrame.set(false)
+                            } finally {
+                                imageProxy.close()
+                            }
+                        }
+
                         val cameraSelector = CameraSelector.Builder()
                             .requireLensFacing(lensFacing)
                             .build()
@@ -399,7 +554,8 @@ fun CameraScreen(
                                 lifecycleOwner,
                                 cameraSelector,
                                 preview,
-                                capture
+                                capture,
+                                imageAnalysis
                             )
 
                             cameraControl = cam.cameraControl
@@ -495,6 +651,63 @@ fun CameraScreen(
 
             // Grid Overlay (Rule of Thirds or Golden Ratio)
             CameraGridOverlay(gridType = gridType)
+
+            // 2.39:1 Anamorphic Cinematic Letterbox Bars
+            CameraCinematicLetterboxOverlay(visible = shootingMode == CameraShootingMode.CINEMATIC)
+
+            // Portrait Mode Framing Guide (Golden Ratio Face Oval)
+            if (shootingMode == CameraShootingMode.PORTRAIT) {
+                CameraPortraitGuideOverlay()
+            }
+
+            // Pro Mode Live Histogram
+            if (shootingMode == CameraShootingMode.PRO) {
+                CameraHistogramOverlay(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 68.dp, end = 16.dp)
+                )
+            }
+
+            // Live MIKE AI Scene Diagnosis Badge (Real-time intelligent detection)
+            AnimatedVisibility(
+                visible = liveDetectedScene != SceneType.GENERAL,
+                enter = fadeIn(tween(200)),
+                exit = fadeOut(tween(200)),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 74.dp)
+            ) {
+                LiquidGlassCard(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(AmberStudio)
+                        )
+                        Text(
+                            text = when (liveDetectedScene) {
+                                SceneType.PORTRAIT -> "MIKE AI • PORTRAIT"
+                                SceneType.NIGHT, SceneType.LOW_LIGHT -> "MIKE AI • NUIT"
+                                SceneType.LANDSCAPE -> "MIKE AI • PAYSAGE"
+                                SceneType.DOCUMENT -> "MIKE AI • DOCUMENT"
+                                else -> "MIKE AI • OPTIMISÉ"
+                            },
+                            color = TextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
 
             // Horizon / Level Virtual Indicator
             CameraLevelIndicator(
@@ -658,6 +871,26 @@ fun CameraScreen(
                 .padding(top = 58.dp)
         )
 
+        // 3.2 Pro Mode Top HUD Bar
+        if (shootingMode == CameraShootingMode.PRO && activeBubble == CameraActiveBubble.NONE) {
+            CameraProHudBar(
+                iso = proIso,
+                shutter = proShutterSpeed,
+                ev = exposureCompensationIndex * exposureStep,
+                kelvin = "${proKelvin}K",
+                focus = if (isManualFocusActive) String.format(Locale.US, "%.1f", proFocusManualValue) else "AF",
+                isRawEnabled = isRawCapture,
+                onToggleRaw = {
+                    isRawCapture = !isRawCapture
+                    CameraHaptics.playLightTick(context)
+                },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 58.dp)
+            )
+        }
+
         // 3.5 Mode-specific Liquid Glass Overlay controls (PRO, Portrait, Pano, SlowMo, Timelapse, Cinematic)
         Box(
             modifier = Modifier
@@ -670,651 +903,86 @@ fun CameraScreen(
             androidx.compose.animation.AnimatedContent(
                 targetState = shootingMode,
                 transitionSpec = {
-                    fadeIn(animationSpec = tween(220)) with fadeOut(animationSpec = tween(220))
+                    fadeIn(animationSpec = tween(200)) with fadeOut(animationSpec = tween(180))
                 },
                 label = "modeOverlayTransition"
             ) { activeMode ->
                 when (activeMode) {
                     CameraShootingMode.PRO -> {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            // Sub-panel dedicated adjustments slider / options
-                            LiquidGlassCard(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 8.dp),
-                                shape = RoundedCornerShape(20.dp),
-                                backgroundColor = Color(0xB3080C14),
-                                borderTopColor = Color(0x33FFFFFF),
-                                borderBottomColor = Color(0x11FFFFFF)
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text(
-                                        text = when (selectedProParam) {
-                                            "ISO" -> "Sensibilité Capteur (ISO)"
-                                            "OBT" -> "Vitesse d'Obturation (Shutter)"
-                                            "BdB" -> "Balance des Blancs (Temp)"
-                                            "MAP" -> "Mise au Point Manuelle (Focus)"
-                                            else -> "Compensation d'Exposition (EV)"
-                                        },
-                                        color = AmberStudio,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        letterSpacing = 1.sp,
-                                        modifier = Modifier.padding(bottom = 6.dp)
-                                    )
-
-                                    when (selectedProParam) {
-                                        "ISO" -> {
-                                            val isoOptions = listOf("Auto", "100", "200", "400", "800", "1600", "3200")
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.SpaceEvenly
-                                            ) {
-                                                isoOptions.forEach { option ->
-                                                    val isSelected = proIso == option
-                                                    Text(
-                                                        text = option,
-                                                        color = if (isSelected) AmberStudio else TextSecondary,
-                                                        fontSize = 13.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
-                                                        modifier = Modifier
-                                                            .clickable {
-                                                                proIso = option
-                                                                CameraHaptics.playLightTick(context)
-                                                            }
-                                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        "OBT" -> {
-                                            val shutterOptions = listOf("Auto", "1/1000s", "1/500s", "1/250s", "1/125s", "1/60s", "1/30s", "1/15s", "1s")
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .horizontalScroll(rememberScrollState()),
-                                                horizontalArrangement = Arrangement.spacedBy(16.dp)
-                                            ) {
-                                                shutterOptions.forEach { option ->
-                                                    val isSelected = proShutterSpeed == option
-                                                    Text(
-                                                        text = option,
-                                                        color = if (isSelected) AmberStudio else TextSecondary,
-                                                        fontSize = 13.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
-                                                        modifier = Modifier
-                                                            .clickable {
-                                                                proShutterSpeed = option
-                                                                CameraHaptics.playLightTick(context)
-                                                            }
-                                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        "BdB" -> {
-                                            val wbOptions = listOf("Auto", "Soleil ☀️", "Nuageux ☁️", "Tungstène 💡", "Néon 🧪")
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .horizontalScroll(rememberScrollState()),
-                                                horizontalArrangement = Arrangement.spacedBy(14.dp)
-                                            ) {
-                                                wbOptions.forEach { option ->
-                                                    val isSelected = proWhiteBalance == option
-                                                    Text(
-                                                        text = option,
-                                                        color = if (isSelected) AmberStudio else TextSecondary,
-                                                        fontSize = 13.sp,
-                                                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
-                                                        modifier = Modifier
-                                                            .clickable {
-                                                                proWhiteBalance = option
-                                                                CameraHaptics.playLightTick(context)
-                                                            }
-                                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        "MAP" -> {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    text = "Auto",
-                                                    color = if (proFocusMode == "Auto") AmberStudio else TextSecondary,
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier
-                                                        .clickable {
-                                                            proFocusMode = "Auto"
-                                                            CameraHaptics.playLightTick(context)
-                                                        }
-                                                        .padding(8.dp)
-                                                )
-                                                Text(
-                                                    text = "Infini ⛰️",
-                                                    color = if (proFocusMode == "Infini") AmberStudio else TextSecondary,
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier
-                                                        .clickable {
-                                                            proFocusMode = "Infini"
-                                                            CameraHaptics.playLightTick(context)
-                                                        }
-                                                        .padding(8.dp)
-                                                )
-                                                Text(
-                                                    text = "Manuel 🔍",
-                                                    color = if (proFocusMode == "Manuel") AmberStudio else TextSecondary,
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier
-                                                        .clickable {
-                                                            proFocusMode = "Manuel"
-                                                            CameraHaptics.playLightTick(context)
-                                                        }
-                                                        .padding(8.dp)
-                                                )
-
-                                                if (proFocusMode == "Manuel") {
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    LiquidGlassSlider(
-                                                        value = proFocusManualValue,
-                                                        onValueChange = {
-                                                            proFocusManualValue = it
-                                                        },
-                                                        modifier = Modifier.weight(1f)
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        else -> {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.Center,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Text(
-                                                    text = "${if (exposureCompensationIndex > 0) "+" else ""}${exposureCompensationIndex * exposureStep} EV",
-                                                    color = AmberStudio,
-                                                    fontSize = 16.sp,
-                                                    fontWeight = FontWeight.Black
-                                                )
-                                                Spacer(modifier = Modifier.width(16.dp))
-                                                LiquidGlassSlider(
-                                                    value = (exposureCompensationIndex - minExposureIndex).toFloat() / (maxExposureIndex - minExposureIndex).toFloat(),
-                                                    onValueChange = {
-                                                        val calculatedIndex = minExposureIndex + (it * (maxExposureIndex - minExposureIndex)).toInt()
-                                                        if (calculatedIndex != exposureCompensationIndex) {
-                                                            exposureCompensationIndex = calculatedIndex
-                                                            try {
-                                                                cameraControl?.setExposureCompensationIndex(calculatedIndex)
-                                                            } catch (_: Exception) {}
-                                                            CameraHaptics.playLightTick(context)
-                                                        }
-                                                    },
-                                                    modifier = Modifier.width(180.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Horizontal parameters bar
-                            LiquidGlassCard(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(16.dp),
-                                backgroundColor = Color(0xCC080C14),
-                                borderTopColor = Color(0x33FFFFFF),
-                                borderBottomColor = Color(0x11FFFFFF)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 8.dp),
-                                    horizontalArrangement = Arrangement.SpaceEvenly,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    val params = listOf("ISO", "OBT", "BdB", "MAP", "EV")
-                                    params.forEach { p ->
-                                        val isSelected = selectedProParam == p
-                                        Column(
-                                            modifier = Modifier
-                                                .clickable {
-                                                    selectedProParam = p
-                                                    CameraHaptics.playLightTick(context)
-                                                }
-                                                .padding(horizontal = 12.dp, vertical = 4.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally
-                                        ) {
-                                            Text(
-                                                text = p,
-                                                color = if (isSelected) AmberStudio else TextMuted,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Black
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = when (p) {
-                                                    "ISO" -> proIso
-                                                    "OBT" -> proShutterSpeed
-                                                    "BdB" -> proWhiteBalance.take(4)
-                                                    "MAP" -> if (proFocusMode == "Manuel") String.format(Locale.US, "%.1f", proFocusManualValue) else proFocusMode
-                                                    else -> "${if (exposureCompensationIndex > 0) "+" else ""}${exposureCompensationIndex * exposureStep}"
-                                                },
-                                                color = if (isSelected) AmberStudio else TextSecondary,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Medium
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        CameraProControlsDeck(
+                            selectedParam = selectedProParam,
+                            onSelectParam = { selectedProParam = it },
+                            iso = proIso,
+                            onIsoChange = { proIso = it },
+                            shutter = proShutterSpeed,
+                            onShutterChange = { proShutterSpeed = it },
+                            kelvin = proKelvin,
+                            onKelvinChange = { proKelvin = it },
+                            manualFocus = proFocusManualValue,
+                            isManualFocusActive = isManualFocusActive,
+                            onFocusModeChange = { isManualFocusActive = it },
+                            onManualFocusValueChange = { proFocusManualValue = it },
+                            exposureCompensationIndex = exposureCompensationIndex,
+                            minExposureIndex = minExposureIndex,
+                            maxExposureIndex = maxExposureIndex,
+                            exposureStep = exposureStep,
+                            onExposureChange = { newIndex ->
+                                exposureCompensationIndex = newIndex
+                                try {
+                                    cameraControl?.setExposureCompensationIndex(newIndex)
+                                } catch (_: Exception) {}
+                            },
+                            meteringMode = proMeteringMode,
+                            onMeteringChange = { proMeteringMode = it }
+                        )
                     }
 
                     CameraShootingMode.PORTRAIT -> {
-                        LiquidGlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(20.dp),
-                            backgroundColor = Color(0xD9080C14),
-                            borderTopColor = Color(0x33FFFFFF),
-                            borderBottomColor = Color(0x11FFFFFF)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Flou Bokeh",
-                                        color = TextPrimary,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.width(110.dp)
-                                    )
-                                    val apertureOptions = listOf("f/1.4", "f/2.0", "f/2.8", "f/4.0", "f/8.0", "f/16")
-                                    Row(
-                                        modifier = Modifier.weight(1f),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        apertureOptions.forEach { aperture ->
-                                            val isSelected = portraitAperture == aperture
-                                            Text(
-                                                text = aperture,
-                                                color = if (isSelected) AmberStudio else TextSecondary,
-                                                fontSize = 11.5.sp,
-                                                fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
-                                                modifier = Modifier
-                                                    .clickable {
-                                                        portraitAperture = aperture
-                                                        CameraHaptics.playLightTick(context)
-                                                    }
-                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                                            )
-                                        }
-                                    }
-                                }
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Lissage Peau",
-                                        color = TextPrimary,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.width(110.dp)
-                                    )
-                                    LiquidGlassSlider(
-                                        value = portraitSkinSmoothing / 100f,
-                                        onValueChange = { portraitSkinSmoothing = it * 100f },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${portraitSkinSmoothing.toInt()}%",
-                                        color = AmberStudio,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.width(32.dp),
-                                        textAlign = TextAlign.End
-                                    )
-                                }
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Teint Studio",
-                                        color = TextPrimary,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.width(110.dp)
-                                    )
-                                    LiquidGlassSlider(
-                                        value = portraitWarmth / 100f,
-                                        onValueChange = { portraitWarmth = it * 100f },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${portraitWarmth.toInt()}%",
-                                        color = AmberStudio,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.width(32.dp),
-                                        textAlign = TextAlign.End
-                                    )
-                                }
-                            }
-                        }
+                        CameraPortraitControlsDeck(
+                            aperture = portraitAperture,
+                            onApertureChange = { portraitAperture = it },
+                            selectedLighting = portraitLighting,
+                            onLightingChange = { portraitLighting = it },
+                            skinSmoothing = portraitSkinSmoothing,
+                            onSkinSmoothingChange = { portraitSkinSmoothing = it },
+                            skinWarmth = portraitWarmth,
+                            onSkinWarmthChange = { portraitWarmth = it }
+                        )
                     }
 
                     CameraShootingMode.PANORAMA -> {
-                        LiquidGlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(20.dp),
-                            backgroundColor = Color(0xD9080C14),
-                            borderTopColor = Color(0x33FFFFFF),
-                            borderBottomColor = Color(0x11FFFFFF)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "GUIDE PANORAMIQUE",
-                                    color = AmberStudio,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.2.sp
-                                )
-
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(36.dp)
-                                        .background(Color(0x22FFFFFF), RoundedCornerShape(8.dp))
-                                        .border(0.5.dp, Color(0x33FFFFFF), RoundedCornerShape(8.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        if (panoramaDirectionLeftToRight) {
-                                            Text("DÉPART", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Balayez lentement vers la droite ", color = TextSecondary, fontSize = 11.sp)
-                                                Text("➔", color = AmberStudio, fontSize = 14.sp)
-                                            }
-                                            Text("FIN", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                        } else {
-                                            Text("FIN", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("🫲 Balayez lentement vers la gauche", color = TextSecondary, fontSize = 11.sp)
-                                            }
-                                            Text("DÉPART", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-
-                                    if (isPanoramaCapturing) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(AmberStudio.copy(alpha = 0.15f))
-                                                .align(Alignment.CenterStart)
-                                                .fillMaxWidth(panoramaProgress)
-                                        )
-                                    }
-                                }
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = if (isPanoramaCapturing) "Enregistrement... ${(panoramaProgress * 100).toInt()}%" else "Prêt à balayer",
-                                        color = if (isPanoramaCapturing) AmberStudio else TextSecondary,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-
-                                    if (!isPanoramaCapturing) {
-                                        Row(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0x22FFFFFF))
-                                                .clickable {
-                                                    panoramaDirectionLeftToRight = !panoramaDirectionLeftToRight
-                                                    CameraHaptics.playLightTick(context)
-                                                }
-                                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = if (panoramaDirectionLeftToRight) "Gauche ➔ Droite" else "Droite 🫲 Gauche",
-                                                color = TextPrimary,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    } else {
-                                        LaunchedEffect(isPanoramaCapturing) {
-                                            panoramaProgress = 0f
-                                            while (panoramaProgress < 1.0f) {
-                                                delay(100)
-                                                panoramaProgress += 0.04f
-                                            }
-                                            isPanoramaCapturing = false
-                                            executePhotoCapture()
-                                        }
-                                    }
-                                }
+                        CameraPanoramaControlsDeck(
+                            isCapturing = isPanoramaCapturing,
+                            progress = panoramaProgress,
+                            directionLeftToRight = panoramaDirectionLeftToRight,
+                            onToggleDirection = {
+                                panoramaDirectionLeftToRight = !panoramaDirectionLeftToRight
+                                CameraHaptics.playLightTick(context)
                             }
-                        }
+                        )
                     }
 
                     CameraShootingMode.SLOW_MOTION -> {
-                        LiquidGlassCard(
-                            modifier = Modifier.fillMaxWidth(0.85f),
-                            shape = RoundedCornerShape(20.dp),
-                            backgroundColor = Color(0xD9080C14),
-                            borderTopColor = Color(0x33FFFFFF),
-                            borderBottomColor = Color(0x11FFFFFF)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(8.dp)
-                                            .background(Color.Red, CircleShape)
-                                    )
-                                    Text(
-                                        text = "RALENTI DE PRÉCISION",
-                                        color = TextPrimary,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        letterSpacing = 1.sp
-                                    )
-                                }
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceEvenly
-                                ) {
-                                    listOf("120 FPS", "240 FPS").forEach { fps ->
-                                        val isSelected = slowMotionFps == fps
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .background(if (isSelected) AmberStudio else Color(0x1AFFFFFF))
-                                                .clickable {
-                                                    slowMotionFps = fps
-                                                    CameraHaptics.playLightTick(context)
-                                                }
-                                                .padding(horizontal = 16.dp, vertical = 6.dp)
-                                        ) {
-                                            Text(
-                                                text = fps,
-                                                color = if (isSelected) DarkBg else TextPrimary,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Black
-                                            )
-                                        }
-                                    }
-                                }
-                                Text(
-                                    text = if (slowMotionFps == "120 FPS") "Idéal pour le sport & mouvements fluides" else "Super ralenti extrême pour l'eau & projectiles",
-                                    color = TextMuted,
-                                    fontSize = 10.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
+                        CameraSlowMotionControlsDeck(
+                            selectedFps = slowMotionFps,
+                            onFpsChange = { slowMotionFps = it }
+                        )
                     }
 
                     CameraShootingMode.TIME_LAPSE -> {
-                        LiquidGlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(20.dp),
-                            backgroundColor = Color(0xD9080C14),
-                            borderTopColor = Color(0x33FFFFFF),
-                            borderBottomColor = Color(0x11FFFFFF)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "INTERVALLE DE TEMPS (ACCÉLÉRÉ)",
-                                    color = AmberStudio,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    val intervals = listOf("1s", "2s", "5s", "10s", "30s")
-                                    intervals.forEach { interval ->
-                                        val isSelected = timeLapseInterval == interval
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(if (isSelected) AmberStudio else Color(0x1AFFFFFF))
-                                                .clickable {
-                                                    timeLapseInterval = interval
-                                                    CameraHaptics.playLightTick(context)
-                                                }
-                                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                                        ) {
-                                            Text(
-                                                text = interval,
-                                                color = if (isSelected) DarkBg else TextPrimary,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Black
-                                            )
-                                        }
-                                    }
-                                }
-                                Text(
-                                    text = when (timeLapseInterval) {
-                                        "1s" -> "Idéal pour les nuages rapides & foules (Accéléré 30x)"
-                                        "2s" -> "Idéal pour les couchers de soleil & aurores (Accéléré 60x)"
-                                        "5s" -> "Idéal pour la trajectoire des étoiles (Accéléré 150x)"
-                                        "10s" -> "Idéal pour les chantiers ou plantes (Accéléré 300x)"
-                                        else -> "Idéal pour les grands cycles temporels (Accéléré 900x)"
-                                    },
-                                    color = TextMuted,
-                                    fontSize = 10.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
+                        CameraTimeLapseControlsDeck(
+                            selectedInterval = timeLapseInterval,
+                            onIntervalChange = { timeLapseInterval = it }
+                        )
                     }
 
                     CameraShootingMode.CINEMATIC -> {
-                        LiquidGlassCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(20.dp),
-                            backgroundColor = Color(0xD9080C14),
-                            borderTopColor = Color(0x33FFFFFF),
-                            borderBottomColor = Color(0x11FFFFFF)
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(
-                                    text = "FILTRE DE COULEURS CINÉMA (LUT)",
-                                    color = AmberStudio,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp
-                                )
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .horizontalScroll(rememberScrollState()),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    val cinematicLuts = listOf("LUT Or", "Anamorphique", "Noir Rétro", "Froid Sci-Fi", "Naturel")
-                                    cinematicLuts.forEach { lut ->
-                                        val isSelected = cinematicColorProfile == lut
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .background(if (isSelected) AmberStudio else Color(0x1AFFFFFF))
-                                                .clickable {
-                                                    cinematicColorProfile = lut
-                                                    CameraHaptics.playLightTick(context)
-                                                }
-                                                .padding(horizontal = 14.dp, vertical = 6.dp)
-                                        ) {
-                                            Text(
-                                                text = lut,
-                                                color = if (isSelected) DarkBg else TextPrimary,
-                                                fontSize = 11.5.sp,
-                                                fontWeight = FontWeight.Black
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        CameraCinematicControlsDeck(
+                            selectedLut = cinematicColorProfile,
+                            onLutChange = { cinematicColorProfile = it }
+                        )
                     }
+
                     else -> {}
                 }
             }
@@ -1411,50 +1079,116 @@ fun CameraScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Shooting Modes Carousel (PHOTO, PORTRAIT, NUIT, PRO)
-            Row(
+            // Shooting Modes Carousel (PHOTO, PORTRAIT, NUIT, PRO...)
+            // Centers the selected mode horizontally and displays a high-visibility active indicator
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
+                    .testTag("shooting_modes_carousel")
             ) {
-                CameraShootingMode.entries.forEach { mode ->
-                    val isSelected = mode == shootingMode
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) {
-                                if (shootingMode != mode) {
-                                    shootingMode = mode
-                                    CameraHaptics.playLightTick(context)
-                                }
-                            }
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        contentAlignment = Alignment.Center
+                val screenWidth = maxWidth
+                val itemEstimatedWidth = 84.dp
+                val sidePadding = ((screenWidth - itemEstimatedWidth) / 2).coerceAtLeast(0.dp)
+                val modeListState = rememberLazyListState()
+
+                // Smoothly scroll and center the selected mode whenever it changes
+                LaunchedEffect(shootingMode) {
+                    val targetIndex = CameraShootingMode.entries.indexOf(shootingMode)
+                    if (targetIndex >= 0) {
+                        modeListState.animateScrollToItem(
+                            index = targetIndex,
+                            scrollOffset = 0
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    LazyRow(
+                        state = modeListState,
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = sidePadding),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Text(
-                                text = mode.title,
-                                color = if (isSelected) AmberStudio else TextMuted,
-                                fontSize = 13.5.sp,
-                                fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
-                                letterSpacing = 1.1.sp
+                        itemsIndexed(CameraShootingMode.entries) { index, mode ->
+                            val isSelected = mode == shootingMode
+                            val modeScale by animateFloatAsState(
+                                targetValue = if (isSelected) 1.08f else 0.92f,
+                                animationSpec = spring(dampingRatio = 0.75f, stiffness = 420f),
+                                label = "modeScale"
                             )
-                            Spacer(modifier = Modifier.height(3.dp))
+                            val textColor by animateColorAsState(
+                                targetValue = if (isSelected) AmberStudio else TextMuted,
+                                animationSpec = tween(200),
+                                label = "modeTextColor"
+                            )
+
                             Box(
                                 modifier = Modifier
-                                    .size(4.dp)
-                                    .background(if (isSelected) AmberStudio else Color.Transparent, CircleShape)
-                            )
+                                    .scale(modeScale)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isSelected) Color(0x38FFB020)
+                                        else Color(0x1A080C14)
+                                    )
+                                    .border(
+                                        width = if (isSelected) 1.5.dp else 0.5.dp,
+                                        color = if (isSelected) AmberStudio.copy(alpha = 0.85f) else Color(0x22FFFFFF),
+                                        shape = CircleShape
+                                    )
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        if (shootingMode != mode) {
+                                            shootingMode = mode
+                                            CameraHaptics.playLightTick(context)
+                                        }
+                                        coroutineScope.launch {
+                                            modeListState.animateScrollToItem(index, 0)
+                                        }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = mode.title,
+                                        color = textColor,
+                                        fontSize = 13.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold,
+                                        letterSpacing = 1.2.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    // High-visibility selection indicator bar/dot
+                                    Box(
+                                        modifier = Modifier
+                                            .width(if (isSelected) 14.dp else 0.dp)
+                                            .height(3.dp)
+                                            .background(
+                                                color = if (isSelected) AmberStudio else Color.Transparent,
+                                                shape = RoundedCornerShape(2.dp)
+                                            )
+                                    )
+                                }
+                            }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    // Luminous center chevron / pointer aligning the active mode to the viewfinder center
+                    Box(
+                        modifier = Modifier
+                            .size(width = 6.dp, height = 4.dp)
+                            .background(AmberStudio.copy(alpha = 0.85f), CircleShape)
+                    )
                 }
             }
 
@@ -1532,45 +1266,11 @@ fun CameraScreen(
             }
         }
 
-        // Full Screen Mode Switch Reset Transition Overlay
-        AnimatedVisibility(
-            visible = isSwitchingMode,
-            enter = fadeIn(animationSpec = tween(120)),
-            exit = fadeOut(animationSpec = tween(150))
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xE6080C14)), // Premium blurred dark glass simulation
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        color = AmberStudio,
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(44.dp)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = shootingMode.title,
-                        color = AmberStudio,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 1.8.sp
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = shootingMode.subtitle,
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-        }
+        // Seamless Native Mode Switch Iris Bloom & Floating Badge Animation
+        CameraModeSwitchOverlay(
+            activeMode = shootingMode,
+            isSwitching = isSwitchingMode
+        )
     }
 }
 

@@ -13,6 +13,10 @@ object MikeSceneDetector {
      * Defaults to GENERAL if confidence is low.
      */
     suspend fun detect(bitmap: Bitmap): Pair<SceneType, Float> = withContext(Dispatchers.Default) {
+        detectDirect(bitmap)
+    }
+
+    fun detectDirect(bitmap: Bitmap): Pair<SceneType, Float> {
         val width = bitmap.width
         val height = bitmap.height
         val totalSampledTarget = 6000
@@ -71,7 +75,7 @@ object MikeSceneDetector {
             }
         }
 
-        if (totalSamples == 0) return@withContext Pair(SceneType.GENERAL, 0.5f)
+        if (totalSamples == 0) return Pair(SceneType.GENERAL, 0.5f)
 
         val avgLum = sumLum / totalSamples
         val darkRatio = darkPixels.toFloat() / totalSamples
@@ -80,7 +84,7 @@ object MikeSceneDetector {
         val vegRatio = vegetationPixels.toFloat() / totalSamples
         val docRatio = documentContrastEdges.toFloat() / totalSamples
 
-        when {
+        return when {
             // Night / Low light
             darkRatio > 0.55 || (avgLum < 45.0 && darkRatio > 0.40) -> {
                 val conf = (darkRatio.coerceAtMost(0.95f))

@@ -2,6 +2,8 @@ package com.example.engine
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -12,7 +14,8 @@ object MikeAIEngine {
     var activeBackend: ImageEnhancementBackend = ClassicEngineBackend()
 
     /**
-     * Decodes an image file efficiently with downsampling if required.
+     * Decodes an image file efficiently with downsampling and applies EXIF orientation in memory.
+     * The original image file on disk is NEVER modified, re-encoded, or altered.
      */
     suspend fun decodeSampledBitmap(
         imageFile: File,
@@ -24,11 +27,29 @@ object MikeAIEngine {
         }
         BitmapFactory.decodeFile(imageFile.absolutePath, options)
 
-        var inSampleSize = 1
         val origWidth = options.outWidth
         val origHeight = options.outHeight
 
-        while ((origHeight / inSampleSize) > maxHeight || (origWidth / inSampleSize) > maxWidth) {
+        val exifOrientation = try {
+            val exif = ExifInterface(imageFile.absolutePath)
+            exif.getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        } catch (_: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+
+        val isSwapped = exifOrientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+            exifOrientation == ExifInterface.ORIENTATION_ROTATE_270 ||
+            exifOrientation == ExifInterface.ORIENTATION_TRANSPOSE ||
+            exifOrientation == ExifInterface.ORIENTATION_TRANSVERSE
+
+        val visualWidth = if (isSwapped) origHeight else origWidth
+        val visualHeight = if (isSwapped) origWidth else origHeight
+
+        var inSampleSize = 1
+        while ((visualHeight / inSampleSize) > maxHeight || (visualWidth / inSampleSize) > maxWidth) {
             inSampleSize *= 2
         }
 
@@ -38,7 +59,7 @@ object MikeAIEngine {
             inMutable = true
         }
 
-        try {
+        val rawBitmap = try {
             BitmapFactory.decodeFile(imageFile.absolutePath, decodeOptions)
                 ?: throw IllegalStateException("Impossible de décoder le fichier image: ${imageFile.name}")
         } catch (e: OutOfMemoryError) {
@@ -52,6 +73,41 @@ object MikeAIEngine {
             BitmapFactory.decodeFile(imageFile.absolutePath, fallbackOptions)
                 ?: throw IllegalStateException("Mémoire insuffisante pour décoder: ${imageFile.name}")
         }
+
+        if (exifOrientation == ExifInterface.ORIENTATION_NORMAL ||
+            exifOrientation == ExifInterface.ORIENTATION_UNDEFINED
+        ) {
+            return@withContext rawBitmap
+        }
+
+        val matrix = Matrix()
+        when (exifOrientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+        }
+
+        val rotatedBitmap = try {
+            Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+        } catch (e: OutOfMemoryError) {
+            System.gc()
+            rawBitmap
+        }
+
+        if (rotatedBitmap != rawBitmap) {
+            rawBitmap.recycle()
+        }
+        rotatedBitmap
     }
 
     /**
@@ -101,5 +157,19 @@ object MikeAIEngine {
         val fullBitmap = decodeSampledBitmap(imageFile, maxWidth = maxDim, maxHeight = maxDim)
         val result = processImage(fullBitmap, params, onProgress)
         result.copy(isFullResolution = true)
+    }
+
+    /**
+     * Executes ultra-fast, lightweight local enhancement for live camera frames (LIVE_PREVIEW).
+     * Strictly offline, local CPU, non-blocking.
+     */
+    fun processLivePreview(
+        sourceBitmap: Bitmap,
+        params: EnhancementParams = EnhancementParams(),
+        analysis: ImageAnalysis? = null
+    ): Bitmap {
+        val resolvedAnalysis = analysis ?: MikeImageAnalyzer.analyzeDirect(sourceBitmap)
+        val adaptedParams = MikePresetProcessor.adaptParamsForScene(params, resolvedAnalysis)
+        return activeBackend.processLivePreview(sourceBitmap, resolvedAnalysis, adaptedParams)
     }
 }

@@ -145,14 +145,11 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                // 1. Normalize orientation via EXIF
-                MediaManager.normalizeImageOrientation(capturedFile)
-
-                // 2. Decode high-resolution bitmap with memory bounds safe for Tecno Camon 15 Air
+                // 1. Decode high-resolution bitmap safely handling EXIF orientation in-memory without altering original file
                 val maxDim = com.example.util.DeviceOptimizer.getMaxBitmapDimension(context)
                 val originalBmp = MikeAIEngine.decodeSampledBitmap(capturedFile, maxWidth = maxDim, maxHeight = maxDim)
 
-                // 3. Complete diagnostic analysis & scene detection
+                // 2. Complete diagnostic analysis & scene detection
                 val analysis = MikeAIEngine.analyzeImage(originalBmp)
 
                 _uiState.update {
@@ -188,7 +185,12 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun onCustomCameraCapture(context: Context, capturedFile: File, mode: CameraShootingMode) {
+    fun onCustomCameraCapture(
+        context: Context,
+        capturedFile: File,
+        mode: CameraShootingMode,
+        modeParams: EnhancementParams? = null
+    ) {
         if (!capturedFile.exists() || capturedFile.length() == 0L) {
             _uiState.update { it.copy(errorMessage = "La photo n'a pas pu être enregistrée.") }
             return
@@ -196,18 +198,19 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                // 1. Normalize orientation via EXIF safely without unconstrained allocation
-                MediaManager.normalizeImageOrientation(capturedFile)
-
-                // 2. Decode high-resolution bitmap with memory bounds safe for Tecno Camon 15 Air
+                // 1. Decode high-resolution bitmap safely handling EXIF orientation in-memory without altering original file
                 val maxDim = com.example.util.DeviceOptimizer.getMaxBitmapDimension(context)
                 val originalBmp = MikeAIEngine.decodeSampledBitmap(capturedFile, maxWidth = maxDim, maxHeight = maxDim)
 
-                // 3. Complete diagnostic analysis & scene detection
+                // 2. Complete diagnostic analysis & scene detection
                 val analysis = MikeAIEngine.analyzeImage(originalBmp)
 
                 // 4. Determine initial preset based on shooting mode
                 val targetPreset = mode.targetPreset
+                val effectiveParams = modeParams ?: EnhancementParams(
+                    preset = targetPreset,
+                    aiIntensity = _uiState.value.defaultAiIntensity
+                )
 
                 _uiState.update {
                     it.copy(
@@ -216,10 +219,7 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                         originalFile = capturedFile,
                         detectedScene = analysis.sceneType,
                         currentAnalysis = analysis,
-                        currentParams = EnhancementParams(
-                            preset = targetPreset,
-                            aiIntensity = it.defaultAiIntensity
-                        ),
+                        currentParams = effectiveParams,
                         isProcessing = false,
                         errorMessage = null
                     )
@@ -319,7 +319,6 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 val processedBmp = result.processedBitmap
-                val processedFile = MediaManager.saveProcessedBitmapToFile(context, processedBmp, prefix = "ENHANCED")
 
                 // Permanently persist the original file to filesDir if it's currently in cacheDir (temp capture)
                 val finalOriginalFile = if (file.absolutePath.contains(context.cacheDir.absolutePath)) {
@@ -331,6 +330,13 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     file
                 }
+
+                val processedFile = MediaManager.saveProcessedBitmapToFile(
+                    context,
+                    processedBmp,
+                    prefix = "ENHANCED",
+                    originalFile = finalOriginalFile
+                )
 
                 val photoRecord = ProcessedPhoto(
                     originalPath = finalOriginalFile.absolutePath,
@@ -413,15 +419,32 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         val current = _uiState.value.currentParams
         val updated = current.copy(
-            exposure = exposure ?: current.exposure,
-            contrast = contrast ?: current.contrast,
-            shadows = shadows ?: current.shadows,
-            highlights = highlights ?: current.highlights,
-            vibrance = vibrance ?: current.vibrance,
-            warmth = warmth ?: current.warmth,
-            sharpness = sharpness ?: current.sharpness
+            exposure = exposure?.coerceIn(-0.50f, 0.50f) ?: current.exposure,
+            contrast = contrast?.coerceIn(-0.50f, 0.50f) ?: current.contrast,
+            shadows = shadows?.coerceIn(-0.50f, 1.00f) ?: current.shadows,
+            highlights = highlights?.coerceIn(-1.00f, 0.50f) ?: current.highlights,
+            vibrance = vibrance?.coerceIn(-1.00f, 1.00f) ?: current.vibrance,
+            warmth = warmth?.coerceIn(-0.50f, 0.50f) ?: current.warmth,
+            sharpness = sharpness?.coerceIn(0.00f, 1.00f) ?: current.sharpness
         )
         reprocessWithParams(updated)
+    }
+
+    fun resetAdjustments() {
+        val current = _uiState.value.currentParams
+        val defaultPreset = current.preset
+        val resetParams = EnhancementParams(
+            preset = defaultPreset,
+            exposure = defaultPreset.defaultExposure,
+            contrast = defaultPreset.defaultContrast,
+            shadows = defaultPreset.defaultShadows,
+            highlights = defaultPreset.defaultHighlights,
+            vibrance = defaultPreset.defaultVibrance,
+            warmth = defaultPreset.defaultWarmth,
+            sharpness = defaultPreset.defaultSharpness,
+            aiIntensity = 1.0f
+        )
+        reprocessWithParams(resetParams)
     }
 
     private fun reprocessWithParams(params: EnhancementParams) {
@@ -434,15 +457,26 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
             val newProcessedBmp = result.processedBitmap
 
             val context = getApplication<Application>()
-            val processedFile = MediaManager.saveProcessedBitmapToFile(context, newProcessedBmp, prefix = "ENHANCED")
+            val processedFile = MediaManager.saveProcessedBitmapToFile(
+                context,
+                newProcessedBmp,
+                prefix = "ENHANCED",
+                originalFile = _uiState.value.originalFile
+            )
 
             val currentId = _uiState.value.currentPhotoId
             if (currentId != 0L) {
                 val record = repository.getPhotoById(currentId)
                 if (record != null) {
+                    val oldPath = record.processedPath
+                    if (oldPath.isNotEmpty() && oldPath != processedFile.absolutePath && oldPath != record.originalPath) {
+                        try { File(oldPath).delete() } catch (_: Exception) {}
+                    }
                     repository.updatePhoto(
                         record.copy(
                             processedPath = processedFile.absolutePath,
+                            width = newProcessedBmp.width,
+                            height = newProcessedBmp.height,
                             presetName = params.preset.title,
                             aiIntensity = params.aiIntensity,
                             exposureAdj = params.exposure,
@@ -474,7 +508,7 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val bitmapToSave = if (origFile != null && origFile.exists() && origFile.length() > 0L) {
                 try {
-                    // Full resolution processing for export
+                    // Full resolution processing for export & permanent gallery saving
                     val fullResult = MikeAIEngine.processFullResolution(origFile, params)
                     fullResult.processedBitmap
                 } catch (_: Exception) {
@@ -484,13 +518,34 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
                 currentBmp
             }
 
-            val uri = MediaManager.saveToDeviceGallery(context, bitmapToSave)
+            val uri = MediaManager.saveToDeviceGallery(context, bitmapToSave, originalFile = origFile)
             if (uri != null) {
                 val currentId = _uiState.value.currentPhotoId
                 if (currentId != 0L) {
-                    repository.markAsSaved(currentId)
+                    val record = repository.getPhotoById(currentId)
+                    if (record != null) {
+                        val fullProcessedFile = MediaManager.saveProcessedBitmapToFile(
+                            context,
+                            bitmapToSave,
+                            prefix = "ENHANCED",
+                            originalFile = origFile
+                        )
+                        if (record.processedPath.isNotEmpty() && record.processedPath != fullProcessedFile.absolutePath && record.processedPath != record.originalPath) {
+                            try { File(record.processedPath).delete() } catch (_: Exception) {}
+                        }
+                        repository.updatePhoto(
+                            record.copy(
+                                processedPath = fullProcessedFile.absolutePath,
+                                width = bitmapToSave.width,
+                                height = bitmapToSave.height,
+                                isSavedToGallery = true
+                            )
+                        )
+                    } else {
+                        repository.markAsSaved(currentId)
+                    }
                 }
-                _uiState.update { it.copy(isSavedToGallery = true) }
+                _uiState.update { it.copy(isSavedToGallery = true, processedBitmap = bitmapToSave) }
             } else {
                 Toast.makeText(context, "Erreur lors de l'enregistrement.", Toast.LENGTH_SHORT).show()
             }
@@ -544,12 +599,18 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
             val origFile = File(photo.originalPath)
             val procFile = File(photo.processedPath)
 
+            val context = getApplication<Application>()
+            val maxDim = com.example.util.DeviceOptimizer.getMaxBitmapDimension(context)
             val origBmp = if (origFile.exists()) {
-                BitmapFactory.decodeFile(origFile.absolutePath)
+                try {
+                    MikeAIEngine.decodeSampledBitmap(origFile, maxWidth = maxDim, maxHeight = maxDim)
+                } catch (_: Exception) { null }
             } else null
 
             val procBmp = if (procFile.exists()) {
-                BitmapFactory.decodeFile(procFile.absolutePath)
+                try {
+                    MikeAIEngine.decodeSampledBitmap(procFile, maxWidth = maxDim, maxHeight = maxDim)
+                } catch (_: Exception) { null }
             } else null
 
             if (procBmp != null) {

@@ -74,4 +74,13 @@ class GeminiProxyBackend(
 
         return resultBitmap ?: sourceBitmap
     }
+
+    override fun processLivePreview(
+        sourceBitmap: Bitmap,
+        analysis: ImageAnalysis,
+        params: EnhancementParams
+    ): Bitmap {
+        // Live camera preview is ALWAYS local, lightweight and non-blocking (Gemini is post-capture only)
+        return fallbackBackend.processLivePreview(sourceBitmap, analysis, params)
+    }
 }

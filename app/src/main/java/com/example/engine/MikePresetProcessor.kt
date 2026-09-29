@@ -109,7 +109,15 @@ data class EnhancementParams(
     val vibrance: Float = preset.defaultVibrance,
     val warmth: Float = preset.defaultWarmth,
     val sharpness: Float = preset.defaultSharpness,
-    val aiIntensity: Float = 1.0f
+    val aiIntensity: Float = 1.0f,
+    val portraitAperture: Float = 0f,
+    val portraitSkinSmoothing: Float = 0f,
+    val portraitLighting: String = "Naturel",
+    val proIso: String = "Auto",
+    val proShutterSpeed: String = "Auto",
+    val proWhiteBalance: String = "Auto",
+    val cinematicLut: String = "",
+    val isPanorama: Boolean = false
 )
 
 object MikePresetProcessor {
@@ -122,6 +130,19 @@ object MikePresetProcessor {
         analysis: ImageAnalysis
     ): EnhancementParams {
         if (baseParams.preset != EnhancementPreset.NATURAL) {
+            return baseParams
+        }
+
+        // If the user has manually customized any adjustment, strictly preserve user's explicit values!
+        val isDefaultNatural = baseParams.exposure == EnhancementPreset.NATURAL.defaultExposure &&
+            baseParams.contrast == EnhancementPreset.NATURAL.defaultContrast &&
+            baseParams.shadows == EnhancementPreset.NATURAL.defaultShadows &&
+            baseParams.highlights == EnhancementPreset.NATURAL.defaultHighlights &&
+            baseParams.vibrance == EnhancementPreset.NATURAL.defaultVibrance &&
+            baseParams.warmth == EnhancementPreset.NATURAL.defaultWarmth &&
+            baseParams.sharpness == EnhancementPreset.NATURAL.defaultSharpness
+
+        if (!isDefaultNatural) {
             return baseParams
         }
 

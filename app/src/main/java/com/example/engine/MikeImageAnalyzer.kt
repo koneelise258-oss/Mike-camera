@@ -12,6 +12,10 @@ import kotlin.math.sqrt
 object MikeImageAnalyzer {
 
     suspend fun analyze(bitmap: Bitmap): ImageAnalysis = withContext(Dispatchers.Default) {
+        analyzeDirect(bitmap)
+    }
+
+    fun analyzeDirect(bitmap: Bitmap): ImageAnalysis {
         val width = bitmap.width
         val height = bitmap.height
         val totalPixels = width * height
@@ -117,9 +121,9 @@ object MikeImageAnalyzer {
         val (estimatedNoise, sharpness, detailLevel) = estimateNoiseAndSharpness(bitmap)
 
         // Scene detection
-        val (sceneType, sceneConfidence) = MikeSceneDetector.detect(bitmap)
+        val (sceneType, sceneConfidence) = MikeSceneDetector.detectDirect(bitmap)
 
-        ImageAnalysis(
+        return ImageAnalysis(
             sceneType = sceneType,
             sceneConfidence = sceneConfidence,
             avgLuminance = avgLum,

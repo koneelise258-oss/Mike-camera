@@ -32,9 +32,9 @@ fun Modifier.animatedGlassBorder(
     isActive: Boolean = false,
     durationMillis: Int = 6000
 ): Modifier = composed {
-    val infiniteTransition = rememberInfiniteTransition(label = "glassBorderBreathing")
-    val breathingAlpha by if (isActive) {
-        infiniteTransition.animateFloat(
+    val breathingAlpha = if (isActive) {
+        val infiniteTransition = rememberInfiniteTransition(label = "glassBorderBreathing")
+        val alpha by infiniteTransition.animateFloat(
             initialValue = 0.45f,
             targetValue = 0.75f,
             animationSpec = infiniteRepeatable(
@@ -43,8 +43,9 @@ fun Modifier.animatedGlassBorder(
             ),
             label = "borderBreathing"
         )
+        alpha
     } else {
-        androidx.compose.runtime.remember { androidx.compose.runtime.mutableFloatStateOf(0.35f) }
+        0.35f
     }
 
     val borderBrush = if (isActive) {

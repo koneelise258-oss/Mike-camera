@@ -259,8 +259,8 @@ fun MainApp(viewModel: PhotoViewModel) {
                             Screen.CAMERA -> {
                                 CameraScreen(
                                     latestPhoto = allPhotos.firstOrNull(),
-                                    onPhotoCaptured = { photoFile, shootingMode ->
-                                        viewModel.onCustomCameraCapture(context, photoFile, shootingMode)
+                                    onPhotoCaptured = { photoFile, shootingMode, params ->
+                                        viewModel.onCustomCameraCapture(context, photoFile, shootingMode, params)
                                     },
                                     onOpenGallery = { viewModel.navigateTo(Screen.GALLERY) },
                                     onBack = { viewModel.navigateTo(Screen.GALLERY) }
@@ -271,8 +271,8 @@ fun MainApp(viewModel: PhotoViewModel) {
                                 // Fallback redirects directly to camera in camera-first architecture
                                 CameraScreen(
                                     latestPhoto = allPhotos.firstOrNull(),
-                                    onPhotoCaptured = { photoFile, shootingMode ->
-                                        viewModel.onCustomCameraCapture(context, photoFile, shootingMode)
+                                    onPhotoCaptured = { photoFile, shootingMode, params ->
+                                        viewModel.onCustomCameraCapture(context, photoFile, shootingMode, params)
                                     },
                                     onOpenGallery = { viewModel.navigateTo(Screen.GALLERY) },
                                     onBack = { viewModel.navigateTo(Screen.GALLERY) }
@@ -330,7 +330,8 @@ fun MainApp(viewModel: PhotoViewModel) {
                                         onAiIntensityChange = { intensity -> viewModel.updateAiIntensity(intensity) },
                                         onAdjustmentsChange = { exp, cont, shd, hgl, vib, wrm, shp ->
                                             viewModel.updateAdjustments(exp, cont, shd, hgl, vib, wrm, shp)
-                                        }
+                                        },
+                                        onResetAdjustments = { viewModel.resetAdjustments() }
                                     )
                                 } else {
                                     ProcessingAnimation(
