@@ -262,6 +262,9 @@ fun MainApp(viewModel: PhotoViewModel) {
                                     onPhotoCaptured = { photoFile, shootingMode, params ->
                                         viewModel.onCustomCameraCapture(context, photoFile, shootingMode, params)
                                     },
+                                    onVideoCaptured = { videoFile, duration, mode ->
+                                        viewModel.onCustomVideoCaptured(context, videoFile, duration, mode)
+                                    },
                                     onOpenGallery = { viewModel.navigateTo(Screen.GALLERY) },
                                     onBack = { viewModel.navigateTo(Screen.GALLERY) }
                                 )
@@ -273,6 +276,9 @@ fun MainApp(viewModel: PhotoViewModel) {
                                     latestPhoto = allPhotos.firstOrNull(),
                                     onPhotoCaptured = { photoFile, shootingMode, params ->
                                         viewModel.onCustomCameraCapture(context, photoFile, shootingMode, params)
+                                    },
+                                    onVideoCaptured = { videoFile, duration, mode ->
+                                        viewModel.onCustomVideoCaptured(context, videoFile, duration, mode)
                                     },
                                     onOpenGallery = { viewModel.navigateTo(Screen.GALLERY) },
                                     onBack = { viewModel.navigateTo(Screen.GALLERY) }
@@ -310,6 +316,7 @@ fun MainApp(viewModel: PhotoViewModel) {
                                         originalBitmap = original,
                                         processedBitmap = processed,
                                         currentParams = uiState.currentParams,
+                                        videoFile = uiState.originalFile,
                                         isProcessing = uiState.isProcessing,
                                         isSavedToGallery = uiState.isSavedToGallery,
                                         isFavorite = uiState.isCurrentFavorite,

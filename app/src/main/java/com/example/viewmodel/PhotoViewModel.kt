@@ -240,6 +240,85 @@ class PhotoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun onCustomVideoCaptured(
+        context: Context,
+        videoFile: File,
+        durationSeconds: Int,
+        mode: CameraShootingMode
+    ) {
+        viewModelScope.launch {
+            try {
+                _uiState.update {
+                    it.copy(
+                        currentScreen = Screen.PROCESSING,
+                        isProcessing = true,
+                        processingMessage = "Enregistrement de la vidéo…",
+                        errorMessage = null
+                    )
+                }
+
+                // 1. Copy video from cache/temp to permanent files directory
+                val permanentVideoFile = MediaManager.persistOriginalFile(context, videoFile)
+
+                // 2. Generate and save thumbnail image
+                val thumbnailBmp = MediaManager.getVideoThumbnail(context, permanentVideoFile)
+                    ?: Bitmap.createBitmap(1280, 720, Bitmap.Config.ARGB_8888)
+
+                val thumbnailFile = MediaManager.saveProcessedBitmapToFile(
+                    context,
+                    thumbnailBmp,
+                    prefix = "THUMB_VIDEO",
+                    originalFile = permanentVideoFile
+                )
+
+                // 3. Create database entry
+                val photoRecord = ProcessedPhoto(
+                    originalPath = permanentVideoFile.absolutePath,
+                    processedPath = thumbnailFile.absolutePath,
+                    timestamp = System.currentTimeMillis(),
+                    width = thumbnailBmp.width,
+                    height = thumbnailBmp.height,
+                    presetName = mode.title,
+                    isSavedToGallery = false,
+                    isFavorite = false,
+                    aiIntensity = 1.0f,
+                    sceneType = "Vidéo ${mode.title.lowercase()}",
+                    isVideo = true,
+                    videoDurationSeconds = durationSeconds,
+                    shootingModeName = mode.name
+                )
+                val insertedId = repository.insertPhoto(photoRecord)
+
+                _uiState.update {
+                    it.copy(
+                        currentScreen = Screen.COMPARISON,
+                        originalBitmap = thumbnailBmp,
+                        processedBitmap = thumbnailBmp,
+                        originalFile = permanentVideoFile,
+                        currentPhotoId = insertedId,
+                        isProcessing = false,
+                        isSavedToGallery = false,
+                        isCurrentFavorite = false,
+                        currentParams = EnhancementParams(
+                            preset = mode.targetPreset,
+                            isVideo = true,
+                            videoDurationSeconds = durationSeconds,
+                            shootingModeName = mode.name
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isProcessing = false,
+                        currentScreen = Screen.CAMERA,
+                        errorMessage = "Échec de l'enregistrement de la vidéo: ${e.localizedMessage}"
+                    )
+                }
+            }
+        }
+    }
+
     fun onPhotoImported(context: Context, uri: Uri) {
         viewModelScope.launch {
             try {

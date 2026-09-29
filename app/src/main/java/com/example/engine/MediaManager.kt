@@ -57,6 +57,31 @@ object MediaManager {
         return Pair(file, uri)
     }
 
+    fun createTempVideoCaptureFile(context: Context, ext: String = "mp4"): Pair<File, Uri> {
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val fileName = "CAPTURE_${timeStamp}.${ext}"
+        val storageDir = getTempDir(context)
+        val file = File(storageDir, fileName)
+        val authority = "${context.packageName}.fileprovider"
+        val uri = FileProvider.getUriForFile(context, authority, file)
+        return Pair(file, uri)
+    }
+
+    fun getVideoThumbnail(context: Context, videoFile: File): Bitmap? {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(videoFile.absolutePath)
+            retriever.getFrameAtTime(500000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {}
+        }
+    }
+
     suspend fun copyUriToInternalStorage(context: Context, sourceUri: Uri): File = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val mimeType = context.contentResolver.getType(sourceUri)

@@ -43,6 +43,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.ui.viewinterop.AndroidView
+import android.widget.VideoView
+import android.widget.MediaController
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -95,6 +99,7 @@ fun ComparisonScreen(
     originalBitmap: Bitmap,
     processedBitmap: Bitmap,
     currentParams: EnhancementParams,
+    videoFile: java.io.File? = null,
     isProcessing: Boolean,
     isSavedToGallery: Boolean,
     isFavorite: Boolean,
@@ -153,6 +158,62 @@ fun ComparisonScreen(
                 processedBitmap = processedBitmap,
                 modifier = Modifier.fillMaxSize()
             )
+
+            // If it's a recorded video, display a centered play button overlay and handle in-app playback dialog
+            if (currentParams.isVideo) {
+                var isVideoPlaying by remember { mutableStateOf(false) }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(76.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x99000000))
+                        .border(1.5.dp, Color.White.copy(alpha = 0.7f), CircleShape)
+                        .clickable { isVideoPlaying = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Lire la vidéo",
+                        tint = Color.White,
+                        modifier = Modifier.size(38.dp)
+                    )
+                }
+
+                if (isVideoPlaying && videoFile != null && videoFile.exists()) {
+                    BasicAlertDialog(
+                        onDismissRequest = { isVideoPlaying = false }
+                    ) {
+                        LiquidGlassCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(240.dp)
+                                .clip(RoundedCornerShape(24.dp)),
+                            shape = RoundedCornerShape(24.dp),
+                            backgroundColor = Color.Black
+                        ) {
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                AndroidView(
+                                    factory = { ctx ->
+                                        VideoView(ctx).apply {
+                                            setVideoPath(videoFile.absolutePath)
+                                            val mediaController = MediaController(ctx)
+                                            mediaController.setAnchorView(this)
+                                            setMediaController(mediaController)
+                                            setOnPreparedListener { mp ->
+                                                mp.isLooping = true
+                                                start()
+                                            }
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             // 2. Discrete Liquid Glass Top Bar
             Row(

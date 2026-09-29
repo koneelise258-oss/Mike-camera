@@ -18,6 +18,14 @@ import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.VideoRecordEvent
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Quality
+import androidx.compose.runtime.key
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.animation.AnimatedVisibility
@@ -110,6 +118,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import android.Manifest
+import android.content.pm.PackageManager
 import com.example.camera.CameraAspectRatio
 import com.example.camera.CameraFlashMode
 import com.example.camera.CameraGridType
@@ -124,6 +134,7 @@ import com.example.engine.MediaManager
 import com.example.engine.MikeAIEngine
 import com.example.engine.MikeImageAnalyzer
 import com.example.engine.SceneType
+import com.example.engine.TimeLapseEncoder
 import com.example.ui.components.CameraCinematicControlsDeck
 import com.example.ui.components.CameraCinematicLetterboxOverlay
 import com.example.ui.components.CameraFocusTarget
@@ -165,11 +176,14 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.Canvas
 import java.util.Locale
 
+enum class RecordingState { IDLE, RECORDING, STOPPING, COMPLETED }
+
 @OptIn(androidx.compose.animation.ExperimentalAnimationApi::class)
 @Composable
 fun CameraScreen(
     latestPhoto: ProcessedPhoto?,
     onPhotoCaptured: (File, CameraShootingMode, EnhancementParams) -> Unit,
+    onVideoCaptured: (File, Int, CameraShootingMode) -> Unit,
     onOpenGallery: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
@@ -247,6 +261,12 @@ fun CameraScreen(
     var videoResolution by remember { mutableStateOf("HD") }
     var isAiVideoEnhancementEnabled by remember { mutableStateOf(true) }
     var isSoftwareStabilizationEnabled by remember { mutableStateOf(true) }
+
+    var recordingState by remember { mutableStateOf(RecordingState.IDLE) }
+    var videoCapture by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
+    var activeRecording by remember { mutableStateOf<Recording?>(null) }
+    var timeLapseCapturedFiles by remember { mutableStateOf(listOf<File>()) }
+    var isTimeLapseRecording by remember { mutableStateOf(false) }
 
     // Dynamic camera instances
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
@@ -413,56 +433,146 @@ fun CameraScreen(
     val onShutterClick: () -> Unit = {
         isZoomWheelExpanded = false
         if (shootingMode.isVideoMode) {
-            // Handle Video Recording Start/Stop
-            if (isRecordingVideo) {
-                // STOP video recording
-                isRecordingVideo = false
-                recordingJob?.cancel()
-                recordingJob = null
-                CameraHaptics.playShutterTick(context)
-
-                val (videoFile, _) = MediaManager.createTempCaptureFile(context)
-                coroutineScope.launch(Dispatchers.IO) {
-                    try {
-                        videoFile.createNewFile()
-                        // Write a realistic JPEG thumbnail frame of the video
-                        val bmp = Bitmap.createBitmap(1280, 720, Bitmap.Config.ARGB_8888)
-                        val out = java.io.FileOutputStream(videoFile)
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
-                        out.close()
-                        bmp.recycle()
-                    } catch (_: java.lang.Exception) {}
-
-                    withContext(Dispatchers.Main) {
-                        val currentModeParams = EnhancementParams(
-                            preset = shootingMode.targetPreset,
-                            cinematicLut = cinematicColorProfile,
-                            isPanorama = false,
-                            proIso = "${videoFps} FPS",
-                            proShutterSpeed = videoResolution,
-                            proWhiteBalance = if (isAiVideoEnhancementEnabled) "IA On" else "IA Off",
-                            isVideo = true,
-                            videoDurationSeconds = recordingSeconds,
-                            shootingModeName = shootingMode.name
-                        )
-                        onPhotoCaptured(videoFile, shootingMode, currentModeParams)
-                        android.widget.Toast.makeText(
-                            context,
-                            "Vidéo enregistrée en ${videoResolution} • ${videoFps} ips avec traitement IA !",
-                            android.widget.Toast.LENGTH_LONG
-                        ).show()
+            if (shootingMode == CameraShootingMode.TIME_LAPSE) {
+                // TIME-LAPSE captures photos periodically, then compiles them using hardware encoder
+                if (isTimeLapseRecording) {
+                    isTimeLapseRecording = false
+                    recordingJob?.cancel()
+                    recordingJob = null
+                    
+                    val filesToEncode = timeLapseCapturedFiles
+                    if (filesToEncode.isEmpty()) {
+                        android.widget.Toast.makeText(context, "Aucune image capturée pour l'accéléré.", android.widget.Toast.LENGTH_SHORT).show()
+                        recordingState = RecordingState.IDLE
+                    } else {
+                        recordingState = RecordingState.STOPPING
+                        android.widget.Toast.makeText(context, "Compilation de l'accéléré en cours...", android.widget.Toast.LENGTH_LONG).show()
+                        
+                        coroutineScope.launch {
+                            val (videoFile, _) = MediaManager.createTempVideoCaptureFile(context)
+                            val success = TimeLapseEncoder.encode(filesToEncode, videoFile, width = 1280, height = 720, fps = 30)
+                            
+                            // Clean up temporary frames
+                            filesToEncode.forEach { try { it.delete() } catch(_: Exception) {} }
+                            timeLapseCapturedFiles = emptyList()
+                            
+                            if (success && videoFile.exists() && videoFile.length() > 0L) {
+                                recordingState = RecordingState.COMPLETED
+                                onVideoCaptured(videoFile, recordingSeconds, shootingMode)
+                            } else {
+                                recordingState = RecordingState.IDLE
+                                android.widget.Toast.makeText(context, "Échec de compilation de l'accéléré.", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                } else {
+                    isTimeLapseRecording = true
+                    recordingSeconds = 0
+                    recordingState = RecordingState.RECORDING
+                    timeLapseCapturedFiles = emptyList()
+                    CameraHaptics.playShutterTick(context)
+                    
+                    val intervalMs = when (timeLapseInterval) {
+                        "1s" -> 1000L
+                        "2s" -> 2000L
+                        "5s" -> 5000L
+                        "10s" -> 10000L
+                        else -> 5000L
+                    }
+                    
+                    recordingJob = coroutineScope.launch {
+                        while (isTimeLapseRecording) {
+                            val capture = imageCapture
+                            if (capture != null) {
+                                val (photoFile, _) = MediaManager.createTempCaptureFile(context)
+                                val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+                                capture.takePicture(
+                                    outputOptions,
+                                    ContextCompat.getMainExecutor(context),
+                                    object : ImageCapture.OnImageSavedCallback {
+                                        override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                            timeLapseCapturedFiles = timeLapseCapturedFiles + photoFile
+                                        }
+                                        override fun onError(exception: ImageCaptureException) {}
+                                    }
+                                )
+                            }
+                            delay(intervalMs)
+                            recordingSeconds++
+                            CameraHaptics.playLightTick(context)
+                        }
                     }
                 }
             } else {
-                // START video recording
-                isRecordingVideo = true
-                recordingSeconds = 0
-                CameraHaptics.playShutterTick(context)
-                recordingJob = coroutineScope.launch {
-                    while (isRecordingVideo) {
-                        delay(1000)
-                        recordingSeconds++
-                        CameraHaptics.playLightTick(context)
+                // VIDEO, SLOW_MOTION, CINEMATIC modes use real VideoCapture
+                if (recordingState == RecordingState.RECORDING) {
+                    recordingState = RecordingState.STOPPING
+                    recordingJob?.cancel()
+                    recordingJob = null
+                    
+                    val recording = activeRecording
+                    if (recording != null) {
+                        recording.stop()
+                        activeRecording = null
+                    } else {
+                        recordingState = RecordingState.IDLE
+                        isRecordingVideo = false
+                    }
+                } else if (recordingState == RecordingState.IDLE) {
+                    val capture = videoCapture
+                    if (capture != null) {
+                        val (tempVideoFile, _) = MediaManager.createTempVideoCaptureFile(context)
+                        val outputOptions = FileOutputOptions.Builder(tempVideoFile).build()
+                        
+                        val audioPermissionGranted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        
+                        val pendingRecording = capture.output.prepareRecording(context, outputOptions)
+                        if (audioPermissionGranted) {
+                            try {
+                                pendingRecording.withAudioEnabled()
+                            } catch (_: SecurityException) {}
+                        } else {
+                            android.widget.Toast.makeText(context, "Audio désactivé (micro refusé)", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                        
+                        CameraHaptics.playShutterTick(context)
+                        recordingSeconds = 0
+                        recordingState = RecordingState.RECORDING
+                        isRecordingVideo = true
+                        
+                        recordingJob = coroutineScope.launch {
+                            while (recordingState == RecordingState.RECORDING) {
+                                delay(1000)
+                                recordingSeconds++
+                                CameraHaptics.playLightTick(context)
+                            }
+                        }
+                        
+                        activeRecording = pendingRecording.start(
+                            ContextCompat.getMainExecutor(context)
+                        ) { recordEvent ->
+                            when (recordEvent) {
+                                is VideoRecordEvent.Start -> {}
+                                is VideoRecordEvent.Finalize -> {
+                                    isRecordingVideo = false
+                                    recordingJob?.cancel()
+                                    recordingJob = null
+                                    
+                                    if (!recordEvent.hasError()) {
+                                        recordingState = RecordingState.COMPLETED
+                                        onVideoCaptured(tempVideoFile, recordingSeconds, shootingMode)
+                                    } else {
+                                        recordingState = RecordingState.IDLE
+                                        android.widget.Toast.makeText(context, "Erreur d'enregistrement.", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        android.widget.Toast.makeText(context, "La capture vidéo n'est pas initialisée.", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -547,157 +657,208 @@ fun CameraScreen(
                 }
         ) {
             // AndroidView CameraX View
-            AndroidView(
-                factory = { ctx ->
-                    val frameLayout = FrameLayout(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                    }
+            // 1.1 Use key to completely recreate and rebind use-cases when crucial parameters change
+            val isVideoPipeline = shootingMode.isVideoMode && shootingMode != CameraShootingMode.TIME_LAPSE
+            key(lensFacing, aspectRatio, isVideoPipeline) {
+                AndroidView(
+                    factory = { ctx ->
+                        val frameLayout = FrameLayout(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                        }
 
-                    val pView = PreviewView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        scaleType = PreviewView.ScaleType.FILL_CENTER
-                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    }
-                    frameLayout.addView(pView)
-                    previewView = pView
+                        val pView = PreviewView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            scaleType = PreviewView.ScaleType.FILL_CENTER
+                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                        }
+                        frameLayout.addView(pView)
+                        previewView = pView
 
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                    cameraProviderFuture.addListener({
-                        val cameraProvider = cameraProviderFuture.get()
+                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
 
-                        val preview = Preview.Builder()
-                            .setTargetAspectRatio(aspectRatio.ratioValue)
-                            .build()
-                            .also {
+                            val previewBuilder = Preview.Builder()
+                                .setTargetAspectRatio(aspectRatio.ratioValue)
+
+                            // Apply Slow Motion frame rate range or Cinematic auto focus modes if supported
+                            if (shootingMode == CameraShootingMode.SLOW_MOTION) {
+                                val targetFps = when (slowMotionFps) {
+                                    "240 FPS" -> 240
+                                    "120 FPS" -> 120
+                                    else -> 60
+                                }
+                                val ext = androidx.camera.camera2.interop.Camera2Interop.Extender(previewBuilder)
+                                ext.setCaptureRequestOption(
+                                    android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                    android.util.Range(targetFps, targetFps)
+                                )
+                            } else if (shootingMode == CameraShootingMode.CINEMATIC) {
+                                val ext = androidx.camera.camera2.interop.Camera2Interop.Extender(previewBuilder)
+                                ext.setCaptureRequestOption(
+                                    android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE,
+                                    android.hardware.camera2.CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                                )
+                            }
+
+                            val preview = previewBuilder.build().also {
                                 it.surfaceProvider = pView.surfaceProvider
                             }
 
-                        val capture = ImageCapture.Builder()
-                            .setTargetAspectRatio(aspectRatio.ratioValue)
-                            .setCaptureMode(
-                                if (shootingMode == CameraShootingMode.NIGHT) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
-                                else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
-                            )
-                            .setFlashMode(
-                                if (flashMode == CameraFlashMode.TORCH) ImageCapture.FLASH_MODE_OFF
-                                else flashMode.modeValue
-                            )
-                            .build()
-                        imageCapture = capture
+                            var captureUseCase: androidx.camera.core.UseCase? = null
 
-                        val imageAnalysis = ImageAnalysis.Builder()
-                            .setTargetAspectRatio(aspectRatio.ratioValue)
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                            .build()
-
-                        imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
-                            try {
-                                val now = System.currentTimeMillis()
-                                if (now - lastAnalysisTime >= 250 && isAnalyzingFrame.compareAndSet(false, true)) {
-                                    lastAnalysisTime = now
-                                    val bmp = imageProxy.toBitmap()
-                                    val scaled = if (bmp.width > 120 || bmp.height > 120) {
-                                        Bitmap.createScaledBitmap(bmp, 100, 100, false)
-                                    } else {
-                                        bmp
-                                    }
-                                    val analysis = MikeImageAnalyzer.analyzeDirect(scaled)
-                                    val liveModeParams = when (shootingMode) {
-                                        CameraShootingMode.PORTRAIT -> EnhancementParams(preset = EnhancementPreset.PORTRAIT)
-                                        CameraShootingMode.NIGHT -> EnhancementParams(preset = EnhancementPreset.NIGHT)
-                                        CameraShootingMode.CINEMATIC -> EnhancementParams(preset = EnhancementPreset.CINEMATIC)
-                                        else -> EnhancementParams(preset = EnhancementPreset.NATURAL)
-                                    }
-                                    val liveEnhanced = MikeAIEngine.processLivePreview(scaled, liveModeParams, analysis)
-                                    liveEnhanced.recycle()
-                                    if (scaled != bmp) scaled.recycle()
-                                    bmp.recycle()
-
-                                    val newScene = analysis.sceneType
-                                    val updatedHistory = (sceneHistory + newScene).takeLast(3)
-                                    sceneHistory = updatedHistory
-                                    val matchesCount = updatedHistory.filter { scene -> scene == newScene }.size
-                                    if (matchesCount >= 2) {
-                                        liveDetectedScene = newScene
-                                    }
-                                    isAnalyzingFrame.set(false)
+                            if (isVideoPipeline) {
+                                val quality = when (videoResolution) {
+                                    "FHD" -> Quality.FHD
+                                    "HD" -> Quality.HD
+                                    "SD" -> Quality.SD
+                                    else -> Quality.LOWEST
                                 }
-                            } catch (_: Exception) {
-                                isAnalyzingFrame.set(false)
-                            } finally {
-                                imageProxy.close()
+                                val recorder = Recorder.Builder()
+                                    .setQualitySelector(QualitySelector.from(quality))
+                                    .build()
+                                val videoCaptureInstance = VideoCapture.withOutput(recorder)
+                                videoCapture = videoCaptureInstance
+                                captureUseCase = videoCaptureInstance
+                            } else {
+                                val capture = ImageCapture.Builder()
+                                    .setTargetAspectRatio(aspectRatio.ratioValue)
+                                    .setCaptureMode(
+                                        if (shootingMode == CameraShootingMode.NIGHT) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                                        else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                                    )
+                                    .setFlashMode(
+                                        if (flashMode == CameraFlashMode.TORCH) ImageCapture.FLASH_MODE_OFF
+                                        else flashMode.modeValue
+                                    )
+                                    .build()
+                                imageCapture = capture
+                                captureUseCase = capture
                             }
+
+                            val imageAnalysis = ImageAnalysis.Builder()
+                                .setTargetAspectRatio(aspectRatio.ratioValue)
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                                .build()
+
+                            imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                                try {
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastAnalysisTime >= 250 && isAnalyzingFrame.compareAndSet(false, true)) {
+                                        lastAnalysisTime = now
+                                        val bmp = imageProxy.toBitmap()
+                                        val scaled = if (bmp.width > 120 || bmp.height > 120) {
+                                            Bitmap.createScaledBitmap(bmp, 100, 100, false)
+                                        } else {
+                                            bmp
+                                        }
+                                        val analysis = MikeImageAnalyzer.analyzeDirect(scaled)
+                                        val liveModeParams = when (shootingMode) {
+                                            CameraShootingMode.PORTRAIT -> EnhancementParams(preset = EnhancementPreset.PORTRAIT)
+                                            CameraShootingMode.NIGHT -> EnhancementParams(preset = EnhancementPreset.NIGHT)
+                                            CameraShootingMode.CINEMATIC -> EnhancementParams(preset = EnhancementPreset.CINEMATIC)
+                                            else -> EnhancementParams(preset = EnhancementPreset.NATURAL)
+                                        }
+                                        val liveEnhanced = MikeAIEngine.processLivePreview(scaled, liveModeParams, analysis)
+                                        liveEnhanced.recycle()
+                                        if (scaled != bmp) scaled.recycle()
+                                        bmp.recycle()
+
+                                        val newScene = analysis.sceneType
+                                        val updatedHistory = (sceneHistory + newScene).takeLast(3)
+                                        sceneHistory = updatedHistory
+                                        val matchesCount = updatedHistory.filter { scene -> scene == newScene }.size
+                                        if (matchesCount >= 2) {
+                                            liveDetectedScene = newScene
+                                        }
+                                        isAnalyzingFrame.set(false)
+                                    }
+                                } catch (_: Exception) {
+                                    isAnalyzingFrame.set(false)
+                                } finally {
+                                    imageProxy.close()
+                                }
+                            }
+
+                            val cameraSelector = CameraSelector.Builder()
+                                .requireLensFacing(lensFacing)
+                                .build()
+
+                            try {
+                                cameraProvider.unbindAll()
+                                val cam = if (captureUseCase != null) {
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        cameraSelector,
+                                        preview,
+                                        captureUseCase,
+                                        imageAnalysis
+                                    )
+                                } else {
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        cameraSelector,
+                                        preview,
+                                        imageAnalysis
+                                    )
+                                }
+
+                                cameraControl = cam.cameraControl
+                                cameraInfo = cam.cameraInfo
+
+                                // Update hardware capabilities
+                                hasFlashUnit = cam.cameraInfo.hasFlashUnit()
+                                val zoomState = cam.cameraInfo.zoomState.value
+                                if (zoomState != null) {
+                                    minZoomRatio = zoomState.minZoomRatio
+                                    maxZoomRatio = zoomState.maxZoomRatio.coerceAtMost(10f)
+                                    currentZoomRatio = zoomState.zoomRatio
+                                }
+
+                                val expState = cam.cameraInfo.exposureState
+                                minExposureIndex = expState.exposureCompensationRange.lower
+                                maxExposureIndex = expState.exposureCompensationRange.upper
+                                exposureStep = expState.exposureCompensationStep.toFloat()
+                                exposureCompensationIndex = expState.exposureCompensationIndex
+
+                                // Enable torch if selected
+                                if (flashMode == CameraFlashMode.TORCH && hasFlashUnit) {
+                                    cam.cameraControl.enableTorch(true)
+                                }
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(
+                                    ctx,
+                                    "Erreur d'initialisation caméra: ${e.localizedMessage}",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }, ContextCompat.getMainExecutor(ctx))
+
+                        frameLayout
+                    },
+                    update = {
+                        // Update flash mode on capture instance if changed
+                        imageCapture?.flashMode = if (flashMode == CameraFlashMode.TORCH) {
+                            ImageCapture.FLASH_MODE_OFF
+                        } else {
+                            flashMode.modeValue
                         }
-
-                        val cameraSelector = CameraSelector.Builder()
-                            .requireLensFacing(lensFacing)
-                            .build()
-
-                        try {
-                            cameraProvider.unbindAll()
-                            val cam = cameraProvider.bindToLifecycle(
-                                lifecycleOwner,
-                                cameraSelector,
-                                preview,
-                                capture,
-                                imageAnalysis
-                            )
-
-                            cameraControl = cam.cameraControl
-                            cameraInfo = cam.cameraInfo
-
-                            // Update hardware capabilities
-                            hasFlashUnit = cam.cameraInfo.hasFlashUnit()
-                            val zoomState = cam.cameraInfo.zoomState.value
-                            if (zoomState != null) {
-                                minZoomRatio = zoomState.minZoomRatio
-                                maxZoomRatio = zoomState.maxZoomRatio.coerceAtMost(10f)
-                                currentZoomRatio = zoomState.zoomRatio
-                            }
-
-                            val expState = cam.cameraInfo.exposureState
-                            minExposureIndex = expState.exposureCompensationRange.lower
-                            maxExposureIndex = expState.exposureCompensationRange.upper
-                            exposureStep = expState.exposureCompensationStep.toFloat()
-                            exposureCompensationIndex = expState.exposureCompensationIndex
-
-                            // Enable torch if selected
-                            if (flashMode == CameraFlashMode.TORCH && hasFlashUnit) {
-                                cam.cameraControl.enableTorch(true)
-                            }
-                        } catch (e: Exception) {
-                            android.widget.Toast.makeText(
-                                ctx,
-                                "Erreur d'initialisation caméra: ${e.localizedMessage}",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
+                        if (hasFlashUnit) {
+                            try {
+                                cameraControl?.enableTorch(flashMode == CameraFlashMode.TORCH)
+                            } catch (_: Exception) {}
                         }
-                    }, ContextCompat.getMainExecutor(ctx))
-
-                    frameLayout
-                },
-                update = {
-                    // Update flash mode on capture instance if changed
-                    imageCapture?.flashMode = if (flashMode == CameraFlashMode.TORCH) {
-                        ImageCapture.FLASH_MODE_OFF
-                    } else {
-                        flashMode.modeValue
-                    }
-                    if (hasFlashUnit) {
-                        try {
-                            cameraControl?.enableTorch(flashMode == CameraFlashMode.TORCH)
-                        } catch (_: Exception) {}
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
             // 1:1 Aspect ratio square crop visual mask if 1:1 selected
             if (aspectRatio == CameraAspectRatio.RATIO_1_1) {
@@ -764,7 +925,7 @@ fun CameraScreen(
             }
 
             // 1.5. iPhone-style Video Recording Status Bar Overlay (Blinking timer + red premium pill)
-            if (isRecordingVideo) {
+            if (isRecordingVideo || isTimeLapseRecording) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -1573,7 +1734,7 @@ fun CameraScreen(
                     onClick = onShutterClick,
                     isCapturing = isCapturing,
                     isVideoMode = shootingMode.isVideoMode,
-                    isRecording = isRecordingVideo
+                    isRecording = isRecordingVideo || isTimeLapseRecording
                 )
 
                 // Right: Lens Switch (Rear <-> Front)
